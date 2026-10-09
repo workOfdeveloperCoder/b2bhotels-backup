@@ -1,0 +1,5 @@
+[17-Jun-2026 08:38:06 UTC] PHP Fatal error:  Uncaught Error: Call to a member function post() on null in /home/bbhotelm/public_html/modules/stays/amadeus/creds.php:5
+Stack trace:
+#0 /home/bbhotelm/public_html/modules/stays/amadeus/index.php(4): include()
+#1 {main}
+  thrown in /home/bbhotelm/public_html/modules/stays/amadeus/creds.php on line 5

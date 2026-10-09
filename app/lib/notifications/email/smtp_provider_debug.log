@@ -1,0 +1,147 @@
+2026-06-01 14:21:11 - Connected successfully
+2026-06-01 14:21:11 - Expecting [greeting] 220...
+2026-06-01 14:21:11 - Received for [greeting]: 220 smtp.gmail.com ESMTP a640c23a62f3a-be9d5cd7affsm347878166b.34 - gsmtp
+2026-06-01 14:21:11 - Sending command [EHLO]: EHLO phptravels.com
+2026-06-01 14:21:11 - Expecting [EHLO] 250...
+2026-06-01 14:21:11 - Received for [EHLO]: 250-smtp.gmail.com at your service, [185.140.164.60]
+250-SIZE 35882577
+250-8BITMIME
+250-STARTTLS
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+2026-06-01 14:21:11 - Sending command [STARTTLS]: STARTTLS
+2026-06-01 14:21:11 - Expecting [STARTTLS] 220...
+2026-06-01 14:21:11 - Received for [STARTTLS]: 220 2.0.0 Ready to start TLS
+2026-06-01 14:21:11 - Sending command [EHLO after TLS]: EHLO phptravels.com
+2026-06-01 14:21:11 - Expecting [EHLO after TLS] 250...
+2026-06-01 14:21:11 - Received for [EHLO after TLS]: 250-smtp.gmail.com at your service, [185.140.164.60]
+250-SIZE 35882577
+250-8BITMIME
+250-AUTH LOGIN PLAIN XOAUTH2 PLAIN-CLIENTTOKEN OAUTHBEARER XOAUTH
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+2026-06-01 14:21:11 - Sending command [AUTH LOGIN begin]: AUTH LOGIN
+2026-06-01 14:21:11 - Expecting [AUTH LOGIN begin] 334...
+2026-06-01 14:21:11 - Received for [AUTH LOGIN begin]: 334 VXNlcm5hbWU6
+2026-06-01 14:21:11 - Sending command [AUTH username]: aW5mb0BwaHB0cmF2ZWxzLmNvbQ==
+2026-06-01 14:21:11 - Expecting [AUTH username] 334...
+2026-06-01 14:21:11 - Received for [AUTH username]: 334 UGFzc3dvcmQ6
+2026-06-01 14:21:11 - Sending command [AUTH password]: [PASSWORD HIDDEN]
+2026-06-01 14:21:11 - Expecting [AUTH password] 235...
+2026-06-01 14:21:12 - Received for [AUTH password]: 235 2.7.0 Accepted
+2026-06-01 14:21:12 - Sending command [MAIL FROM]: MAIL FROM:<info@phptravels.com>
+2026-06-01 14:21:12 - Expecting [MAIL FROM] 250...
+2026-06-01 14:21:12 - Received for [MAIL FROM]: 250 2.1.0 OK a640c23a62f3a-be9d5cd7affsm347878166b.34 - gsmtp
+2026-06-01 14:21:12 - Sending command [RCPT TO]: RCPT TO:<shahidiqbal4261@gmail.com>
+2026-06-01 14:21:12 - Expecting [RCPT TO] 250...
+2026-06-01 14:21:12 - Received for [RCPT TO]: 250 2.1.5 OK a640c23a62f3a-be9d5cd7affsm347878166b.34 - gsmtp
+2026-06-01 14:21:12 - Sending command [DATA]: DATA
+2026-06-01 14:21:12 - Expecting [DATA] 354...
+2026-06-01 14:21:12 - Received for [DATA]: 354 Go ahead a640c23a62f3a-be9d5cd7affsm347878166b.34 - gsmtp
+2026-06-01 14:21:12 - Expecting [DATA end] 250...
+2026-06-01 14:21:13 - Received for [DATA end]: 250 2.0.0 OK  1780323673 a640c23a62f3a-be9d5cd7affsm347878166b.34 - gsmtp
+2026-06-01 14:21:13 - Sending command [QUIT]: QUIT
+2026-06-01 14:21:13 - Expecting [QUIT] 221...
+2026-06-01 14:21:13 - Received for [QUIT]: 221 2.0.0 closing connection a640c23a62f3a-be9d5cd7affsm347878166b.34 - gsmtp
+2026-06-01 14:22:00 - Connected successfully
+2026-06-01 14:22:00 - Expecting [greeting] 220...
+2026-06-01 14:22:00 - Received for [greeting]: 220 smtp.gmail.com ESMTP a640c23a62f3a-bed4b76469bsm125670066b.12 - gsmtp
+2026-06-01 14:22:00 - Sending command [EHLO]: EHLO phptravels.com
+2026-06-01 14:22:00 - Expecting [EHLO] 250...
+2026-06-01 14:22:00 - Received for [EHLO]: 250-smtp.gmail.com at your service, [185.140.164.60]
+250-SIZE 35882577
+250-8BITMIME
+250-STARTTLS
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+2026-06-01 14:22:00 - Sending command [STARTTLS]: STARTTLS
+2026-06-01 14:22:00 - Expecting [STARTTLS] 220...
+2026-06-01 14:22:00 - Received for [STARTTLS]: 220 2.0.0 Ready to start TLS
+2026-06-01 14:22:00 - Sending command [EHLO after TLS]: EHLO phptravels.com
+2026-06-01 14:22:00 - Expecting [EHLO after TLS] 250...
+2026-06-01 14:22:00 - Received for [EHLO after TLS]: 250-smtp.gmail.com at your service, [185.140.164.60]
+250-SIZE 35882577
+250-8BITMIME
+250-AUTH LOGIN PLAIN XOAUTH2 PLAIN-CLIENTTOKEN OAUTHBEARER XOAUTH
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+2026-06-01 14:22:00 - Sending command [AUTH LOGIN begin]: AUTH LOGIN
+2026-06-01 14:22:00 - Expecting [AUTH LOGIN begin] 334...
+2026-06-01 14:22:00 - Received for [AUTH LOGIN begin]: 334 VXNlcm5hbWU6
+2026-06-01 14:22:00 - Sending command [AUTH username]: aW5mb0BwaHB0cmF2ZWxzLmNvbQ==
+2026-06-01 14:22:00 - Expecting [AUTH username] 334...
+2026-06-01 14:22:00 - Received for [AUTH username]: 334 UGFzc3dvcmQ6
+2026-06-01 14:22:00 - Sending command [AUTH password]: [PASSWORD HIDDEN]
+2026-06-01 14:22:00 - Expecting [AUTH password] 235...
+2026-06-01 14:22:00 - Received for [AUTH password]: 235 2.7.0 Accepted
+2026-06-01 14:22:00 - Sending command [MAIL FROM]: MAIL FROM:<info@phptravels.com>
+2026-06-01 14:22:00 - Expecting [MAIL FROM] 250...
+2026-06-01 14:22:00 - Received for [MAIL FROM]: 250 2.1.0 OK a640c23a62f3a-bed4b76469bsm125670066b.12 - gsmtp
+2026-06-01 14:22:00 - Sending command [RCPT TO]: RCPT TO:<muzammalnadeem744@gmail.com>
+2026-06-01 14:22:00 - Expecting [RCPT TO] 250...
+2026-06-01 14:22:00 - Received for [RCPT TO]: 250 2.1.5 OK a640c23a62f3a-bed4b76469bsm125670066b.12 - gsmtp
+2026-06-01 14:22:00 - Sending command [DATA]: DATA
+2026-06-01 14:22:00 - Expecting [DATA] 354...
+2026-06-01 14:22:01 - Received for [DATA]: 354 Go ahead a640c23a62f3a-bed4b76469bsm125670066b.12 - gsmtp
+2026-06-01 14:22:01 - Expecting [DATA end] 250...
+2026-06-01 14:22:01 - Received for [DATA end]: 250 2.0.0 OK  1780323721 a640c23a62f3a-bed4b76469bsm125670066b.12 - gsmtp
+2026-06-01 14:22:01 - Sending command [QUIT]: QUIT
+2026-06-01 14:22:01 - Expecting [QUIT] 221...
+2026-06-01 14:22:01 - Received for [QUIT]: 221 2.0.0 closing connection a640c23a62f3a-bed4b76469bsm125670066b.12 - gsmtp
+2026-06-01 14:22:15 - Connected successfully
+2026-06-01 14:22:15 - Expecting [greeting] 220...
+2026-06-01 14:22:15 - Received for [greeting]: 220 smtp.gmail.com ESMTP 4fb4d7f45d1cf-68ceb844b6asm2080006a12.14 - gsmtp
+2026-06-01 14:22:15 - Sending command [EHLO]: EHLO phptravels.com
+2026-06-01 14:22:15 - Expecting [EHLO] 250...
+2026-06-01 14:22:15 - Received for [EHLO]: 250-smtp.gmail.com at your service, [185.140.164.60]
+250-SIZE 35882577
+250-8BITMIME
+250-STARTTLS
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+2026-06-01 14:22:15 - Sending command [STARTTLS]: STARTTLS
+2026-06-01 14:22:15 - Expecting [STARTTLS] 220...
+2026-06-01 14:22:15 - Received for [STARTTLS]: 220 2.0.0 Ready to start TLS
+2026-06-01 14:22:15 - Sending command [EHLO after TLS]: EHLO phptravels.com
+2026-06-01 14:22:15 - Expecting [EHLO after TLS] 250...
+2026-06-01 14:22:15 - Received for [EHLO after TLS]: 250-smtp.gmail.com at your service, [185.140.164.60]
+250-SIZE 35882577
+250-8BITMIME
+250-AUTH LOGIN PLAIN XOAUTH2 PLAIN-CLIENTTOKEN OAUTHBEARER XOAUTH
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+2026-06-01 14:22:15 - Sending command [AUTH LOGIN begin]: AUTH LOGIN
+2026-06-01 14:22:15 - Expecting [AUTH LOGIN begin] 334...
+2026-06-01 14:22:15 - Received for [AUTH LOGIN begin]: 334 VXNlcm5hbWU6
+2026-06-01 14:22:15 - Sending command [AUTH username]: aW5mb0BwaHB0cmF2ZWxzLmNvbQ==
+2026-06-01 14:22:15 - Expecting [AUTH username] 334...
+2026-06-01 14:22:15 - Received for [AUTH username]: 334 UGFzc3dvcmQ6
+2026-06-01 14:22:15 - Sending command [AUTH password]: [PASSWORD HIDDEN]
+2026-06-01 14:22:15 - Expecting [AUTH password] 235...
+2026-06-01 14:22:15 - Received for [AUTH password]: 235 2.7.0 Accepted
+2026-06-01 14:22:15 - Sending command [MAIL FROM]: MAIL FROM:<info@phptravels.com>
+2026-06-01 14:22:15 - Expecting [MAIL FROM] 250...
+2026-06-01 14:22:15 - Received for [MAIL FROM]: 250 2.1.0 OK 4fb4d7f45d1cf-68ceb844b6asm2080006a12.14 - gsmtp
+2026-06-01 14:22:15 - Sending command [RCPT TO]: RCPT TO:<ch161husnain@gmail.com>
+2026-06-01 14:22:15 - Expecting [RCPT TO] 250...
+2026-06-01 14:22:15 - Received for [RCPT TO]: 250 2.1.5 OK 4fb4d7f45d1cf-68ceb844b6asm2080006a12.14 - gsmtp
+2026-06-01 14:22:15 - Sending command [DATA]: DATA
+2026-06-01 14:22:15 - Expecting [DATA] 354...
+2026-06-01 14:22:15 - Received for [DATA]: 354 Go ahead 4fb4d7f45d1cf-68ceb844b6asm2080006a12.14 - gsmtp
+2026-06-01 14:22:15 - Expecting [DATA end] 250...
+2026-06-01 14:22:16 - Received for [DATA end]: 250 2.0.0 OK  1780323736 4fb4d7f45d1cf-68ceb844b6asm2080006a12.14 - gsmtp
+2026-06-01 14:22:16 - Sending command [QUIT]: QUIT
+2026-06-01 14:22:16 - Expecting [QUIT] 221...
+2026-06-01 14:22:16 - Received for [QUIT]: 221 2.0.0 closing connection 4fb4d7f45d1cf-68ceb844b6asm2080006a12.14 - gsmtp

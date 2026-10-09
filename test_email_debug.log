@@ -1,0 +1,9 @@
+2026-06-01 14:21:11 - Hit test-email route
+2026-06-01 14:21:11 - Calling mailer->send
+2026-06-01 14:21:13 - mailer->send result: true
+2026-06-01 14:22:00 - Hit test-email route
+2026-06-01 14:22:00 - Calling mailer->send
+2026-06-01 14:22:01 - mailer->send result: true
+2026-06-01 14:22:15 - Hit test-email route
+2026-06-01 14:22:15 - Calling mailer->send
+2026-06-01 14:22:16 - mailer->send result: true

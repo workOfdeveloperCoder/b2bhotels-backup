@@ -1,0 +1,119 @@
+{
+    "typography": {
+        "font_family": "Inter",
+        "font_size_base": "14",
+        "line_height": "1.5"
+    },
+    "header": {
+        "height": "64",
+        "padding_x": "16",
+        "border_width": "1",
+        "font_size": "14",
+        "background": "#ffffff",
+        "text_color": "#1f2937",
+        "link_color": "#1f2937",
+        "link_hover_color": "#eb7324",
+        "border_color": "#e5e7eb"
+    },
+    "footer": {
+        "padding_y": "30",
+        "padding_x": "16",
+        "border_width": "1",
+        "font_size": "14",
+        "background": "#0b0f19",
+        "text_color": "#9ca3af",
+        "heading_color": "#ffffff",
+        "link_color": "#93c5fd",
+        "border_color": "#1e2636"
+    },
+    "button": {
+        "height": "40",
+        "padding_x": "16",
+        "padding_y": "8",
+        "font_size": "14",
+        "font_weight": "500",
+        "border_radius": "8",
+        "border_width": "0",
+        "background": "#e4570c",
+        "background_hover": "#cb4810",
+        "text_color": "#ffffff",
+        "border_color": "#d66000"
+    },
+    "input": {
+        "height": "40",
+        "padding_x": "12",
+        "padding_y": "8",
+        "font_size": "14",
+        "border_radius": "8",
+        "border_width": "1",
+        "background": "#ffffff",
+        "text_color": "#1f2937",
+        "border_color": "#e5e7eb",
+        "border_focus_color": "#ff6600",
+        "placeholder_color": "#9ca3af"
+    },
+    "textarea": {
+        "min_height": "80",
+        "padding_x": "12",
+        "padding_y": "8",
+        "font_size": "14",
+        "border_radius": "8",
+        "border_width": "1",
+        "background": "#ffffff",
+        "text_color": "#1f2937",
+        "border_color": "#e5e7eb",
+        "border_focus_color": "#f76a3b",
+        "placeholder_color": "#9ca3af"
+    },
+    "select": {
+        "height": "40",
+        "padding_x": "12",
+        "padding_y": "8",
+        "font_size": "14",
+        "border_radius": "8",
+        "border_width": "1",
+        "background": "#ffffff",
+        "text_color": "#1f2937",
+        "border_color": "#e5e7eb",
+        "border_focus_color": "#f7733b"
+    },
+    "card": {
+        "padding": "20",
+        "border_radius": "12",
+        "border_width": "1",
+        "background": "#ffffff",
+        "border_color": "#e5e7eb"
+    },
+    "checkbox": {
+        "size": "16",
+        "border_radius": "4",
+        "border_width": "1",
+        "background": "#ffffff",
+        "background_checked": "#f7613b",
+        "border_color": "#e5e7eb",
+        "border_checked_color": "#f7573b",
+        "checkmark_color": "#ffffff"
+    },
+    "radio": {
+        "size": "16",
+        "border_width": "1",
+        "background": "#ffffff",
+        "border_color": "#e5e7eb",
+        "border_checked_color": "#f74e3b",
+        "dot_color": "#f7573b"
+    },
+    "colors": {
+        "primary": "#3b82f6",
+        "secondary": "#6b7280",
+        "success": "#10b981",
+        "danger": "#ef4444",
+        "warning": "#f59e0b",
+        "info": "#06b6d4",
+        "text": "#1f2937",
+        "text_muted": "#6b7280",
+        "background": "#ffffff",
+        "background_muted": "#f9fafb",
+        "border": "#e5e7eb"
+    },
+    "name": "Default Theme"
+}

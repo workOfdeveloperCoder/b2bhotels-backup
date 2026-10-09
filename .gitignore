@@ -1,0 +1,136 @@
+# Logs
+error.logs
+_error.log
+
+# Environment
+.env
+
+# Updates file
+app/updates.json
+
+# Backups
+backups/**
+
+# Cache
+cache/**
+app/cache/*
+!app/cache/index.html
+
+# Runtime modules
+_REQUEST.json
+
+# UPLOADS
+
+#AGENCIES
+uploads/agencies/**
+!uploads/agencies/index.html
+
+#AGENTS
+uploads/agents/**
+!uploads/agents/index.html
+
+#BLOG
+uploads/blog/**
+!uploads/blog/index.html
+
+#DEPOSIT
+uploads/deposit/**
+!uploads/deposit/index.html
+
+#FLIGHTS
+uploads/flights/**
+!uploads/flights/index.html
+
+#HOTELS
+uploads/hotels/**
+!uploads/hotels/index.html
+
+#INVOICES
+uploads/invoices/**
+!uploads/invoices/index.html
+
+#TICKETS
+uploads/tickets/**
+!uploads/tickets/index.html
+
+#TOURS
+uploads/tours/**
+!uploads/tours/index.html
+
+#TRANSACTIONS
+uploads/transactions/**
+!uploads/transactions/index.html
+
+#UMRAH
+uploads/umrah/**
+uploads/umrah/itinerary/**
+uploads/umrah/gallery/**
+!uploads/umrah/gallery/index.html
+!uploads/umrah/index.html
+
+#VISA
+uploads/visa/**
+!uploads/visa/index.html
+
+modules/stays/hotelbeds/settings.json
+modules/stays/stuba/images
+modules/stays/stuba/logs
+modules/stays/wanderbeds/logs
+modules/stays/ratehawk/logs
+modules/flights/travelport/logs
+modules/rail/train/logs
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.AppleDouble
+.LSOverride
+
+CLAUDE.md
+AGENT.md
+SKILL.md
+Skill.md
+Skills.md
+SKILLS.md
+
+db.jsonl
+.vscode
+.vscode/*
+.cursor/
+v10.zip
+
+# Directories with too many files
+vendor/
+node_modules/
+admin/node_modules/
+admin/dist/
+pt-docs/
+
+app/views/modules/stays/stays-search.php_bk
+app/views/modules/stays/details/stays.php_bk
+app/views/modules/stays/ratehawk/rooms.php_bk
+app/views/modules/stays/ratehawk/actions/issue.php_bk
+app/views/modules/stays/ratehawk/search.php_bk
+
+app/views/auth/login.php.zip
+app/routes/ajaxRoutes.php.zip
+app/routes/users/loginRoutes.php.zip
+app/routes/api/users/loginRoutes.php.zip
+app/routes/users/emailVerificationRoutes.php.zip.well-known.tar
+
+
+# Generated RateHawk content and logs
+/modules/stays/ratehawk/content/ziTHnXGV
+/modules/stays/ratehawk/content/db.jsonl
+/modules/stays/ratehawk/content/wget-log
+
+# Old RateHawk debugging logs and backup files
+/modules/stays/ratehawk/logs_old_bugs/
+/modules/stays/ratehawk/*.php_bk
+
+# Generated Umrah itinerary uploads
+/install/*
+!/install/umrah.php
+
+app/views/admin/updates-config.php

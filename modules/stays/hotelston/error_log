@@ -1,0 +1,5 @@
+[29-Jun-2026 23:29:51 UTC] PHP Fatal error:  Uncaught Error: Call to a member function post() on null in /home/bbhotelm/public_html/modules/stays/hotelston/creds.php:5
+Stack trace:
+#0 /home/bbhotelm/public_html/modules/stays/hotelston/index.php(6): include()
+#1 {main}
+  thrown in /home/bbhotelm/public_html/modules/stays/hotelston/creds.php on line 5
