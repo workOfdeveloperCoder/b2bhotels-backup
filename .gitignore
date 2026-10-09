@@ -134,3 +134,6 @@ app/routes/users/emailVerificationRoutes.php.zip.well-known.tar
 !/install/umrah.php
 
 app/views/admin/updates-config.php
+
+/modules/stays/ratehawk/cache/*
+!/modules/stays/ratehawk/cache/.gitignore
