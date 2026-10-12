@@ -73,6 +73,23 @@ $router->get('/stay/(.*)', function ($params) use ($SECURE,$db) {
     $roomsData = [];
     $totalAdults = 0;
     $totalChildren = 0;
+    $searchIdFromUrl = '';
+
+    // GRNConnect only: the segment after the room configs is the search id.
+    if (strtolower((string)$supplier) === 'grnconnect') {
+        $roomConfigs = array_slice($urlParts, 8, max(1, $totalRooms));
+        $sidIndex = 8 + max(1, $totalRooms);
+        if (isset($urlParts[$sidIndex])) {
+            $candidateSid = trim((string)$urlParts[$sidIndex]);
+            if ($candidateSid !== ''
+                && !in_array(strtolower($candidateSid), ['unknown', '_', 'null'], true)
+                && !preg_match('/^\d+-\d+/', $candidateSid)
+                && preg_match('/^[a-z0-9_-]{8,}$/i', $candidateSid)
+            ) {
+                $searchIdFromUrl = $candidateSid;
+            }
+        }
+    }
 
     foreach ($roomConfigs as $config) {
         $parts = explode('-', $config);
@@ -85,9 +102,9 @@ $router->get('/stay/(.*)', function ($params) use ($SECURE,$db) {
             for ($i = 2; $i < count($parts); $i++) {
                 if (isset($parts[$i]) && $parts[$i] !== '' && is_numeric($parts[$i])) {
                     $age = intval($parts[$i]);
-                    if ($age >= 0 && $age <= 17) {
-                        $childAges[] = $age;
-                    }
+                    if ($age < 1) $age = 1;
+                    if ($age > 17) $age = 17;
+                    $childAges[] = $age;
                 }
             }
             while (count($childAges) < $children) $childAges[] = 1;
@@ -125,6 +142,9 @@ $router->get('/stay/(.*)', function ($params) use ($SECURE,$db) {
         'countries' => $countries,
         'destination' => $_SESSION['hotel_destination'] ?? $hotelName,  // For API calls in details endpoint
     ];
+    if (strtolower((string)$supplier) === 'grnconnect') {
+        $_SESSION['stay_detail']['search_id'] = $searchIdFromUrl;
+    }
 
     // ============================================================================
     // WEBHOOK: Hotel Viewed
@@ -163,6 +183,9 @@ $router->get('/stay/(.*)', function ($params) use ($SECURE,$db) {
     $title = ucwords($hotelName) . ' - ' . $GLOBALS['app']['home_title'];
     $description = "Book " . ucwords($hotelName);
     require_once views."includes/header.php";
-    require_once views."modules/stays/details/stay.php";
+    $stayView = strtolower((string)$supplier) === 'grnconnect'
+        ? views."modules/stays/details/stay-grn.php"
+        : views."modules/stays/details/stay.php";
+    require_once $stayView;
     require_once views."includes/footer.php";
 });

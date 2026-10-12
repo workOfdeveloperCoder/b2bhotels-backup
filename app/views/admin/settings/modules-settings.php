@@ -78,6 +78,25 @@ $moduleCredentials = [
                 'placeholder' => 'Enter your Ratehawk Base URL (e.g. https://api-sandbox.worldota.net/)'
             ],
         ],
+        'grnconnect' => [
+            'c1' => [
+                'label' => 'API Key',
+                'required' => true,
+                'placeholder' => 'Enter your GRNConnect API Key'
+            ],
+            'c2' => [
+                'label' => 'Base URL',
+                'required' => true,
+                'type' => 'text',
+                'placeholder' => 'e.g. https://api-sandbox.grnconnect.com'
+            ],
+            'c3' => [
+                'label' => 'Static / CDN URL',
+                'required' => false,
+                'type' => 'text',
+                'placeholder' => 'Optional (default https://cdn-api.grnconnect.com)'
+            ],
+        ],
         'agoda' => [
             'c1' => [
                 'label' => 'API Key',

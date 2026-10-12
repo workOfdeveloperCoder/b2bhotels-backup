@@ -228,7 +228,7 @@ if (!defined('SUPPLIER_REQUEST_TIMEOUT')) {
 // DATABASE CONNECTION - Medoo ORM Initialization (Initialized early for API key checking)
 // ============================================================================
 try {
-    $db = new Medoo([
+    $dbConfig = [
         'type'     => $env['DB_TYPE'] ?? 'mysql',
         'host'     => $env['DB_HOST'] ?? 'localhost',
         'database' => $env['DB_DATABASE'],
@@ -240,7 +240,12 @@ try {
             \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,  // Throw exceptions on errors
             \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC, // Return associative arrays
         ]
-    ]);
+    ];
+    // MAMP MySQL listens on DB_PORT (8889). Without it, 127.0.0.1 uses 3306 and the test fails.
+    if (!empty($env['DB_PORT'])) {
+        $dbConfig['port'] = (int) $env['DB_PORT'];
+    }
+    $db = new Medoo($dbConfig);
 } catch (\Throwable $e) {
     http_response_code(500);
     header('Content-Type: application/json; charset=utf-8');

@@ -156,6 +156,7 @@ $router->post('/stays/grnconnect/recheck', function () use ($db) {
                         $freshToken['room_references'] = $liveRefs;
                         $freshToken['room_reference']  = $liveRefs[0];
                     }
+                    // Keep selection net on token for audit; booking uses recheck net after accept
                     if (isset($payload['updated_price'])) {
                         $freshToken['net_price'] = (float)$payload['updated_price'];
                         $freshToken['price']     = (float)($option['total_price'] ?? $payload['updated_price']);

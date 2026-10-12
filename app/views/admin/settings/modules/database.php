@@ -2,7 +2,7 @@
 <?php include dirname(__DIR__, 5) . '/modules/esim/airalo/countries.php'; ?>
 <?php endif; ?>
 
-<?php if (in_array(strtolower($module['name'] ?? ''), ['hotelbeds', 'hotelston', 'stuba', 'agoda', 'ratehawk', 'tbo-holidays', 'wanderbeds', 'toursbms', 'widgety'])): ?>
+<?php if (in_array(strtolower($module['name'] ?? ''), ['hotelbeds', 'hotelston', 'stuba', 'agoda', 'ratehawk', 'grnconnect', 'tbo-holidays', 'wanderbeds', 'toursbms', 'widgety'])): ?>
 <div class="bg-white rounded-lg border border-gray-200 overflow-hidden mb-5">
     <div class="px-4 py-3 border-b border-gray-200 bg-gray-50">
         <div class="flex items-center justify-between">
@@ -111,7 +111,7 @@ $showLogsSection = false;
 $logFiles = [];
 $logsPath = '';
 
-if (in_array(strtolower($module['name']), ['hotelbeds', 'hotelston', 'stuba', 'agoda', 'ratehawk', 'tbo-holidays', 'wanderbeds', 'toursbms', 'widgety'])) {
+if (in_array(strtolower($module['name']), ['hotelbeds', 'hotelston', 'stuba', 'agoda', 'ratehawk', 'grnconnect', 'tbo-holidays', 'wanderbeds', 'toursbms', 'widgety'])) {
     $possibleLogPaths = [
         __DIR__ . '/../../../../modules/' . $module['type'] . '/' . $module['name'] . '/logs/',
         $_SERVER['DOCUMENT_ROOT'] . '/v10/modules/' . $module['type'] . '/' . $module['name'] . '/logs/',

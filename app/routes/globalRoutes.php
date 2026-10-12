@@ -290,6 +290,13 @@ $router->get('/modules/([^/]+)/([^/]+)/([^/]+)', function ($moduleType, $moduleN
     // Build the file path
     $filePath = 'modules/' . $moduleType . '/' . $moduleName . '/' . $endpoint . '.php';
 
+    // GRNConnect endpoints only register a route. Including the file does not run it.
+    if ($moduleType === 'stays' && $moduleName === 'grnconnect') {
+        require_once 'modules/stays/grnconnect/bootstrap-dispatch.php';
+        grnconnect_dispatch_in_app($endpoint, $db);
+        exit;
+    }
+
     // Check if file exists and is readable
     if (file_exists($filePath) && is_readable($filePath)) {
         // Include the module endpoint file
@@ -317,6 +324,13 @@ $router->post('/modules/([^/]+)/([^/]+)/([^/]+)', function ($moduleType, $module
 
     // Build the file path
     $filePath = 'modules/' . $moduleType . '/' . $moduleName . '/' . $endpoint . '.php';
+
+    // GRNConnect endpoints only register a route. Including the file does not run it.
+    if ($moduleType === 'stays' && $moduleName === 'grnconnect') {
+        require_once 'modules/stays/grnconnect/bootstrap-dispatch.php';
+        grnconnect_dispatch_in_app($endpoint, $db);
+        exit;
+    }
 
     // Check if file exists and is readable
     if (file_exists($filePath) && is_readable($filePath)) {

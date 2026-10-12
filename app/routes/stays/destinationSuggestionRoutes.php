@@ -590,6 +590,80 @@ $router->post('/hotels-destination-suggestion', function () use ($SECURE, $db) {
     }
 
     // ============================================================================
+    // GRNConnect catalog cities and hotels (content database on the module row).
+    // A city pick carries city_code so search can query that destination.
+    // ============================================================================
+    try {
+        $grnModule = $db->get('modules', ['host', 'database', 'username', 'password', 'status', 'active'], [
+            'name' => 'grnconnect',
+            'type' => 'stays',
+            'status' => 1,
+            'active' => 1,
+        ]);
+        if ($grnModule && !empty($grnModule['database'])) {
+            require_once dirname(__DIR__, 3) . '/modules/stays/grnconnect/content-db.php';
+            $contentDb = function_exists('grnconnect_content_db') ? grnconnect_content_db($grnModule) : null;
+            if ($contentDb && isset($contentDb->pdo)) {
+                $pdo = $contentDb->pdo;
+                $prefix = addcslashes($query, '%_\\') . '%';
+                $cities = function_exists('grnconnect_autocomplete_cities')
+                    ? grnconnect_autocomplete_cities($pdo, $query, $prefix, 12)
+                    : [];
+                foreach ($cities as $city) {
+                    $cityCode = trim((string)($city['city_code'] ?? ''));
+                    if ($cityCode === '') {
+                        continue;
+                    }
+                    $label = $city['search_name'] ?: ($city['name'] ?? $cityCode);
+                    $areaResults[] = [
+                        'id' => $cityCode,
+                        'type' => 'city',
+                        'lc' => 'city',
+                        'name' => $label,
+                        'airportname' => $label,
+                        'cityname' => $label,
+                        'countryname' => (string)($city['country_code'] ?? ''),
+                        'countrycode' => (string)($city['country_code'] ?? ''),
+                        'destination_code' => $cityCode,
+                        'city_code' => $cityCode,
+                        'supplier' => 'grnconnect',
+                        'hotel_count' => 0,
+                        'is_hotel' => false,
+                    ];
+                }
+
+                $hotelStmt = $pdo->prepare(
+                    'SELECT hotel_code, name, address, city_code, country_code
+                     FROM grnconnect_hotels
+                     WHERE name LIKE ?
+                     ORDER BY name ASC
+                     LIMIT 8'
+                );
+                $hotelStmt->execute([$prefix]);
+                foreach ($hotelStmt->fetchAll(\PDO::FETCH_ASSOC) ?: [] as $hotel) {
+                    $hotelResults[] = [
+                        'id' => $hotel['hotel_code'],
+                        'type' => 'hotel',
+                        'lc' => 'hotel',
+                        'name' => $hotel['name'],
+                        'airportname' => $hotel['name'],
+                        'cityname' => $hotel['address'] ?? ($hotel['city_code'] ?? ''),
+                        'countryname' => $hotel['country_code'] ?? '',
+                        'countrycode' => $hotel['country_code'] ?? '',
+                        'hotel_code' => $hotel['hotel_code'],
+                        'city_code' => $hotel['city_code'] ?? '',
+                        'destination_code' => $hotel['city_code'] ?? '',
+                        'supplier' => 'grnconnect',
+                        'is_hotel' => true,
+                    ];
+                }
+            }
+        }
+    } catch (\Throwable $e) {
+        error_log('GRNConnect autocomplete error: ' . $e->getMessage());
+    }
+
+    // ============================================================================
     // MERGE RESULTS: SUPPLIER AREAS, THEN OWN CITIES, THEN HOTELS
     // Areas lead and are ordered by inventory, so the place with the most hotels is
     // the first thing offered — the same ordering hotelbeds.com uses, and the one
@@ -700,7 +774,7 @@ $router->post('/stays/destination-context', function () use ($SECURE, $db) {
 
     // A zone code without its destination code is meaningless — zone codes repeat
     // across destinations — so both are stored, or neither.
-    if (preg_match('/^[A-Z0-9]{2,10}$/', $destinationCode)) {
+    if (preg_match('/^[A-Z0-9]{2,32}$/', $destinationCode)) {
         $_SESSION['hotel_destination_code'] = $destinationCode;
         if (preg_match('/^[A-Z0-9]{1,10}$/', $zoneCode)) {
             $_SESSION['hotel_destination_zone'] = $zoneCode;

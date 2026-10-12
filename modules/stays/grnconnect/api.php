@@ -27,6 +27,8 @@ if (!class_exists('GRNConnectClient')) {
         private $requestTimeout;
         /** @var bool */
         private $logging;
+        /** @var bool */
+        private $ignoreClientAbort = false;
 
         // Static assets version. 2.0 = new numeric codes that match the
         // hotel_code / city_code returned by the availability endpoint.
@@ -65,6 +67,17 @@ if (!class_exists('GRNConnectClient')) {
         public function hasCredentials()
         {
             return $this->apiKey !== '' && $this->baseUrl !== '';
+        }
+
+        public function setIgnoreClientAbort($ignore)
+        {
+            $this->ignoreClientAbort = (bool)$ignore;
+            return $this;
+        }
+
+        private function shouldStopForClientAbort()
+        {
+            return !$this->ignoreClientAbort && connection_aborted();
         }
 
         public function getBaseUrl()
@@ -107,6 +120,25 @@ if (!class_exists('GRNConnectClient')) {
             $duration = (int)round((microtime(true) - $prepared['start']) * 1000);
             curl_close($prepared['ch']);
 
+            // Listing availability is time-critical. Retrying a timeout (~10s + ~10s)
+            // is what made the first batch look like a 20s wait.
+            $noRetry = !empty($opts['no_retry'])
+                || (($opts['category'] ?? '') === 'search')
+                || ($method === 'POST' && stripos($path, 'bookings') !== false);
+            $retryable = !$noRetry && in_array($curlErrno, [28, 35, 52, 55, 56], true);
+            if ($retryable) {
+                usleep(400000);
+                $prepared2 = $this->prepareRequest($method, $path, $opts);
+                if ($prepared2 !== null) {
+                    $raw      = curl_exec($prepared2['ch']);
+                    $httpCode = (int)curl_getinfo($prepared2['ch'], CURLINFO_HTTP_CODE);
+                    $curlErrno = (int)curl_errno($prepared2['ch']);
+                    $curlErr  = curl_error($prepared2['ch']);
+                    $duration += (int)round((microtime(true) - $prepared2['start']) * 1000);
+                    curl_close($prepared2['ch']);
+                }
+            }
+
             return $this->finalizeResponse(
                 $raw,
                 $httpCode,
@@ -131,6 +163,8 @@ if (!class_exists('GRNConnectClient')) {
                 'timeout'  => $timeout,
                 'category' => 'search',
                 'action'   => ($payload['rates'] ?? 'concise'),
+                'no_retry' => true,
+                'connect_timeout' => 5,
             ]);
         }
 
@@ -157,26 +191,51 @@ if (!class_exists('GRNConnectClient')) {
                         'timeout'  => $timeout,
                         'category' => 'search',
                         'action'   => ($payload['rates'] ?? 'concise'),
+                        'no_retry' => true,
+                        'no_log'   => true,
+                        'fresh_connect' => true,
+                        'connect_timeout' => 3,
                     ],
                 ];
             }
-            $results = $this->requestMulti($jobs);
+            return $this->requestMulti($jobs);
+        }
 
-            // Some shared hosts break curl_multi (HTTP 0 / empty body) while
-            // sequential curl_exec still works. Fall back once if every job failed that way.
-            if (count($results) > 1 && $this->allTransportFailures($results)) {
-                $fallback = [];
-                foreach ($jobs as $job) {
-                    $fallback[] = $this->request(
-                        $job['method'] ?? 'POST',
-                        $job['path'] ?? '',
-                        is_array($job['opts'] ?? null) ? $job['opts'] : []
-                    );
+        /**
+         * Fire availability POSTs and call $onDone(index, result, job) as each batch returns.
+         */
+        public function availabilityEach(array $payloads, callable $onDone, $timeout = null)
+        {
+            $jobs = [];
+            foreach ($payloads as $payload) {
+                if (!is_array($payload)) {
+                    continue;
                 }
-                return $fallback;
+                $cutoffMs = (int)($payload['cutoff_time'] ?? 0);
+                $jobTimeout = $timeout;
+                if ($cutoffMs >= 2000) {
+                    // Cutoff is 15s. The JSON body still arrives after that, so keep the socket open.
+                    $jobTimeout = min(40, max(4, (int)ceil($cutoffMs / 1000) + 25));
+                } elseif ($jobTimeout === null) {
+                    $jobTimeout = 13;
+                }
+                $jobs[] = [
+                    'method'   => 'POST',
+                    'path'     => 'api/v3/hotels/availability',
+                    'opts'     => [
+                        'json'     => $payload,
+                        'timeout'  => $jobTimeout,
+                        'category' => 'search',
+                        'action'   => ($payload['rates'] ?? 'concise'),
+                        'no_retry' => true,
+                        'no_log'   => true,
+                        'fresh_connect' => true,
+                        'connect_timeout' => 3,
+                    ],
+                    '_payload' => $payload,
+                ];
             }
-
-            return $results;
+            return $this->requestMultiEach($jobs, $onDone);
         }
 
         /**
@@ -193,13 +252,77 @@ if (!class_exists('GRNConnectClient')) {
         }
 
         /**
+         * One listing wave: new availability POSTs and more_results GETs in the
+         * same curl_multi so coverage and leftover rates progress together.
+         *
+         * @param array $payloads availability JSON bodies
+         * @param array $searchIds search_ids to refetch
+         * @return array{availability:array,refetch:array}
+         */
+        public function mixedListingWave(array $payloads, array $searchIds, $timeout = null, $rates = 'concise')
+        {
+            $jobs = [];
+            $availCount = 0;
+            foreach ($payloads as $payload) {
+                if (!is_array($payload)) {
+                    continue;
+                }
+                $jobs[] = [
+                    'method' => 'POST',
+                    'path'   => 'api/v3/hotels/availability',
+                    'opts'   => [
+                        'json'     => $payload,
+                        'timeout'  => $timeout,
+                        'category' => 'search',
+                        'action'   => ($payload['rates'] ?? 'concise'),
+                        'no_retry' => true,
+                        'no_log'   => true,
+                        'fresh_connect' => true,
+                        'connect_timeout' => 3,
+                    ],
+                ];
+                $availCount++;
+            }
+            $refetchCount = 0;
+            foreach ($searchIds as $searchId) {
+                $searchId = trim((string)$searchId);
+                if ($searchId === '') {
+                    continue;
+                }
+                $opts = [
+                    'query'    => ['rates' => $rates ?: 'concise'],
+                    'category' => 'search',
+                    'action'   => 'refetch_by_search_id',
+                    'no_retry' => true,
+                    'no_log'   => true,
+                    'fresh_connect' => true,
+                    'connect_timeout' => 2,
+                    'timeout'  => 4,
+                ];
+                $jobs[] = [
+                    'method'     => 'GET',
+                    'path'       => 'api/v3/hotels/availability/' . rawurlencode($searchId),
+                    'opts'       => $opts,
+                    '_search_id' => $searchId,
+                ];
+                $refetchCount++;
+            }
+
+            $all = $this->requestMulti($jobs);
+            return [
+                'availability' => array_slice($all, 0, $availCount),
+                'refetch'      => array_slice($all, $availCount, $refetchCount),
+            ];
+        }
+
+        /**
          * Parallel re-fetch by search_id for unfinished batches.
          *
          * @param array $searchIds list of search_id strings
          * @param string $rates concise|comprehensive
          * @return array list of request() results (same order)
          */
-        public function refetchBySearchIdParallel(array $searchIds, $rates = 'concise')
+        public function refetchBySearchIdParallel(array $searchIds, $rates = 'concise', $timeout = null)
         {
             $jobs = [];
             foreach ($searchIds as $searchId) {
@@ -207,30 +330,24 @@ if (!class_exists('GRNConnectClient')) {
                 if ($searchId === '') {
                     continue;
                 }
+                $opts = [
+                    'query'    => ['rates' => $rates ?: 'concise'],
+                    'category' => 'search',
+                    'action'   => 'refetch_by_search_id',
+                    'no_retry' => true,
+                    'no_log'   => true,
+                    'fresh_connect' => true,
+                    'connect_timeout' => 2,
+                    'timeout'  => $timeout !== null ? (int)$timeout : 4,
+                ];
                 $jobs[] = [
-                    'method' => 'GET',
-                    'path'   => 'api/v3/hotels/availability/' . rawurlencode($searchId),
-                    'opts'   => [
-                        'query'    => ['rates' => $rates ?: 'concise'],
-                        'category' => 'search',
-                        'action'   => 'refetch_by_search_id',
-                    ],
+                    'method'     => 'GET',
+                    'path'       => 'api/v3/hotels/availability/' . rawurlencode($searchId),
+                    'opts'       => $opts,
                     '_search_id' => $searchId,
                 ];
             }
-            $results = $this->requestMulti($jobs);
-            if (count($results) > 1 && $this->allTransportFailures($results)) {
-                $fallback = [];
-                foreach ($jobs as $job) {
-                    $fallback[] = $this->request(
-                        $job['method'] ?? 'GET',
-                        $job['path'] ?? '',
-                        is_array($job['opts'] ?? null) ? $job['opts'] : []
-                    );
-                }
-                return $fallback;
-            }
-            return $results;
+            return $this->requestMulti($jobs);
         }
 
         /** Re-fetch a hotel after concise search. Pass bundled=true for multi-room bundles. */
@@ -249,12 +366,79 @@ if (!class_exists('GRNConnectClient')) {
         }
 
         /**
-         * Execute multiple GRN HTTP requests concurrently.
+         * Execute multiple GRN HTTP requests concurrently, in small waves.
+         * Large cities used to fire 20–30 handles at once (and sequential-retry
+         * all of them if curl_multi failed), which pinned php-fpm workers for minutes.
          *
          * @param array $jobs each: method, path, opts (+ optional passthrough keys)
          * @return array results aligned with $jobs
          */
         public function requestMulti(array $jobs)
+        {
+            if (empty($jobs)) {
+                return [];
+            }
+
+            $jobs = array_values($jobs);
+            $waveSize = defined('GRNCONNECT_MAX_CONCURRENT') ? (int)GRNCONNECT_MAX_CONCURRENT : 50;
+            $waveSize = max(1, min(55, $waveSize));
+
+            $all = [];
+            foreach (array_chunk($jobs, $waveSize) as $wave) {
+                if ($this->shouldStopForClientAbort()) {
+                    foreach ($wave as $_) {
+                        $all[] = [
+                            'success' => false, 'http_code' => 0, 'data' => null,
+                            'raw' => null, 'error' => 'Client disconnected', 'error_code' => '',
+                            'duration_ms' => 0,
+                        ];
+                    }
+                    continue;
+                }
+
+                $waveResults = $this->requestMultiWave($wave);
+                // Search jobs must never fall back to sequential retries.
+                // That turned one parallel wave into 30s+ per batch (36s polls).
+                $searchWave = false;
+                foreach ($wave as $job) {
+                    if (($job['opts']['category'] ?? '') === 'search') {
+                        $searchWave = true;
+                        break;
+                    }
+                }
+                if (!$searchWave && count($wave) > 1 && $this->allTransportFailures($waveResults)) {
+                    $probe = $this->request(
+                        $wave[0]['method'] ?? 'GET',
+                        $wave[0]['path'] ?? '',
+                        is_array($wave[0]['opts'] ?? null) ? $wave[0]['opts'] : []
+                    );
+                    $waveResults = [$probe];
+                    if (!empty($probe['success']) || (int)($probe['http_code'] ?? 0) > 0) {
+                        for ($i = 1, $n = count($wave); $i < $n; $i++) {
+                            $waveResults[] = $this->request(
+                                $wave[$i]['method'] ?? 'GET',
+                                $wave[$i]['path'] ?? '',
+                                is_array($wave[$i]['opts'] ?? null) ? $wave[$i]['opts'] : []
+                            );
+                        }
+                    }
+                    while (count($waveResults) < count($wave)) {
+                        $waveResults[] = $waveResults[0];
+                    }
+                }
+                $all = array_merge($all, $waveResults);
+            }
+
+            return $all;
+        }
+
+        /**
+         * Run one small curl_multi wave.
+         *
+         * @param array $jobs
+         * @return array
+         */
+        private function requestMultiWave(array $jobs)
         {
             if (empty($jobs)) {
                 return [];
@@ -272,9 +456,7 @@ if (!class_exists('GRNConnectClient')) {
             }
 
             $mh = curl_multi_init();
-            if (defined('CURLMOPT_MAX_TOTAL_CONNECTIONS')) {
-                @curl_multi_setopt($mh, CURLMOPT_MAX_TOTAL_CONNECTIONS, 10);
-            }
+            $this->configureParallelMulti($mh, count($jobs));
 
             $handles = [];
             $meta    = [];
@@ -293,6 +475,10 @@ if (!class_exists('GRNConnectClient')) {
                 $handles[$i] = $prepared['ch'];
                 $meta[$i] = $prepared;
                 curl_multi_add_handle($mh, $prepared['ch']);
+                // Start this socket now so SSL handshakes overlap while we add the rest.
+                do {
+                    $kickStatus = curl_multi_exec($mh, $runningKick);
+                } while ($kickStatus === CURLM_CALL_MULTI_PERFORM);
             }
 
             $running = null;
@@ -366,6 +552,185 @@ if (!class_exists('GRNConnectClient')) {
         }
 
         /**
+         * Run many GRN requests at once and invoke $onDone as each handle finishes.
+         * Used so listing can flush hotels without waiting for the slowest batch.
+         *
+         * @param array $jobs
+         * @param callable $onDone function(int $index, array $result, array $job): void
+         * @return array results aligned with $jobs
+         */
+        public function requestMultiEach(array $jobs, callable $onDone)
+        {
+            $jobs = array_values($jobs);
+            $n = count($jobs);
+            if ($n === 0) {
+                return [];
+            }
+
+            if ($n === 1) {
+                $job = $jobs[0];
+                $res = $this->request(
+                    $job['method'] ?? 'GET',
+                    $job['path'] ?? '',
+                    is_array($job['opts'] ?? null) ? $job['opts'] : []
+                );
+                $onDone(0, $res, $job);
+                return [$res];
+            }
+
+            $mh = curl_multi_init();
+            $this->configureParallelMulti($mh, $n);
+
+            $handles = [];
+            $meta = [];
+            $idToIndex = [];
+            $results = array_fill(0, $n, null);
+            $handleId = static function ($ch) {
+                return is_object($ch) ? spl_object_id($ch) : (int)$ch;
+            };
+
+            foreach ($jobs as $i => $job) {
+                $prepared = $this->prepareRequest(
+                    $job['method'] ?? 'GET',
+                    $job['path'] ?? '',
+                    is_array($job['opts'] ?? null) ? $job['opts'] : []
+                );
+                if ($prepared === null) {
+                    $res = [
+                        'success' => false, 'http_code' => 0, 'data' => null,
+                        'raw' => null, 'error' => 'Invalid request job', 'error_code' => '',
+                        'duration_ms' => 0,
+                    ];
+                    $results[$i] = $res;
+                    $onDone($i, $res, $job);
+                    continue;
+                }
+                $handles[$i] = $prepared['ch'];
+                $meta[$i] = $prepared;
+                $idToIndex[$handleId($prepared['ch'])] = $i;
+                curl_multi_add_handle($mh, $prepared['ch']);
+                do {
+                    $kickStatus = curl_multi_exec($mh, $runningKick);
+                } while ($kickStatus === CURLM_CALL_MULTI_PERFORM);
+            }
+
+            $running = 0;
+            do {
+                do {
+                    $status = curl_multi_exec($mh, $running);
+                } while ($status === CURLM_CALL_MULTI_PERFORM);
+
+                while ($infoMsg = curl_multi_info_read($mh)) {
+                    if (!is_array($infoMsg) || empty($infoMsg['handle'])) {
+                        continue;
+                    }
+                    if ((int)($infoMsg['msg'] ?? 0) !== CURLMSG_DONE) {
+                        continue;
+                    }
+                    $ch = $infoMsg['handle'];
+                    $id = $handleId($ch);
+                    $i = $idToIndex[$id] ?? null;
+                    if ($i === null || !isset($meta[$i])) {
+                        continue;
+                    }
+                    $info = $meta[$i];
+                    $raw = curl_multi_getcontent($ch);
+                    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                    $curlErrno = (int)curl_errno($ch);
+                    $curlErr = curl_error($ch);
+                    $resultCode = (int)($infoMsg['result'] ?? 0);
+                    if ($curlErr === '' && $resultCode !== CURLE_OK) {
+                        $curlErrno = $resultCode;
+                        $curlErr = function_exists('curl_strerror')
+                            ? curl_strerror($resultCode)
+                            : ('curl multi error #' . $resultCode);
+                    }
+                    $duration = (int)round((microtime(true) - $info['start']) * 1000);
+                    curl_multi_remove_handle($mh, $ch);
+                    curl_close($ch);
+                    unset($handles[$i], $idToIndex[$id], $meta[$i]);
+
+                    $res = $this->finalizeResponse(
+                        $raw,
+                        $httpCode,
+                        $curlErr,
+                        $duration,
+                        $info['opts'],
+                        $info['url'],
+                        $info['method'],
+                        $curlErrno
+                    );
+                    $results[$i] = $res;
+                    $onDone($i, $res, $jobs[$i]);
+                }
+
+                if ($this->shouldStopForClientAbort()) {
+                    foreach ($handles as $ch) {
+                        curl_multi_remove_handle($mh, $ch);
+                        curl_close($ch);
+                    }
+                    $handles = [];
+                    break;
+                }
+
+                if ($running) {
+                    curl_multi_select($mh, 0.05);
+                }
+            } while ($running);
+
+            foreach ($handles as $i => $ch) {
+                if ($ch === null || !isset($meta[$i]) || $results[$i] !== null) {
+                    continue;
+                }
+                $info = $meta[$i];
+                $raw = curl_multi_getcontent($ch);
+                $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $curlErrno = (int)curl_errno($ch);
+                $curlErr = curl_error($ch);
+                $duration = (int)round((microtime(true) - $info['start']) * 1000);
+                curl_multi_remove_handle($mh, $ch);
+                curl_close($ch);
+                $res = $this->finalizeResponse(
+                    $raw,
+                    $httpCode,
+                    $curlErr,
+                    $duration,
+                    $info['opts'],
+                    $info['url'],
+                    $info['method'],
+                    $curlErrno
+                );
+                $results[$i] = $res;
+                $onDone($i, $res, $jobs[$i]);
+            }
+
+            curl_multi_close($mh);
+            return $results;
+        }
+
+        /**
+         * Force true parallelism: a dedicated TCP connection per GRN call.
+         * HTTP/1.1 reuse/pipelining on one socket is what made search take 40s+.
+         */
+        private function configureParallelMulti($mh, $n)
+        {
+            $n = max(2, (int)$n);
+            if (defined('CURLMOPT_PIPELINING')) {
+                $pipe = defined('CURLPIPE_NOTHING') ? CURLPIPE_NOTHING : 0;
+                @curl_multi_setopt($mh, CURLMOPT_PIPELINING, $pipe);
+            }
+            if (defined('CURLMOPT_MAX_TOTAL_CONNECTIONS')) {
+                @curl_multi_setopt($mh, CURLMOPT_MAX_TOTAL_CONNECTIONS, $n);
+            }
+            if (defined('CURLMOPT_MAX_HOST_CONNECTIONS')) {
+                @curl_multi_setopt($mh, CURLMOPT_MAX_HOST_CONNECTIONS, $n);
+            }
+            if (defined('CURLMOPT_MAXCONNECTS')) {
+                @curl_multi_setopt($mh, CURLMOPT_MAXCONNECTS, $n);
+            }
+        }
+
+        /**
          * Build a curl handle + metadata for request / requestMulti.
          * @return array{ch:resource,url:string,method:string,opts:array,start:float}|null
          */
@@ -384,12 +749,26 @@ if (!class_exists('GRNConnectClient')) {
 
             $method  = strtoupper($method);
             $timeout = (int)($opts['timeout'] ?? $this->requestTimeout);
+            $connectTimeout = (int)($opts['connect_timeout'] ?? $this->connectTimeout);
+            if ($connectTimeout <= 0) {
+                $connectTimeout = $this->connectTimeout;
+            }
+            $connectTimeout = max(1, min(10, $connectTimeout));
+            $isSearch = (($opts['category'] ?? '') === 'search') || !empty($opts['fresh_connect']);
+            // Listing must never inherit SUPPLIER_REQUEST_TIMEOUT (30s) — that is the 37s first call.
+            if ($isSearch) {
+                if ($timeout <= 0) {
+                    $timeout = 7;
+                }
+                $timeout = min(55, max(4, $timeout));
+            }
 
             $headers = [
                 'api-key: ' . $this->apiKey,
                 'Accept: application/json',
                 'Content-Type: application/json',
                 'api-version: v3',
+                'Expect:',  // Suppress HTTP 100-Continue; some GRN nodes hang on it.
             ];
 
             $body = null;
@@ -402,15 +781,22 @@ if (!class_exists('GRNConnectClient')) {
                 CURLOPT_URL            => $url,
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_HTTPHEADER     => $headers,
-                CURLOPT_CONNECTTIMEOUT => $this->connectTimeout,
+                CURLOPT_CONNECTTIMEOUT => $connectTimeout,
                 CURLOPT_TIMEOUT        => $timeout,
-                // Shared hosts often lack CA bundles / break on IPv6 or HTTP/2.
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => 0,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
                 CURLOPT_ENCODING       => '',
                 CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_MAXREDIRS      => 3,
+                CURLOPT_NOSIGNAL       => true,
+                // Same-host HTTP/1.1 reuse queues POSTs on one socket = sequential.
+                CURLOPT_FRESH_CONNECT  => $isSearch ? true : false,
+                CURLOPT_FORBID_REUSE   => $isSearch ? true : false,
             ];
+            if (defined('CURLOPT_TCP_NODELAY')) {
+                $curlOpts[CURLOPT_TCP_NODELAY] = true;
+            }
+            // HTTP/1.1 + fresh connections = one TCP socket per batch, all in flight.
             if (defined('CURL_HTTP_VERSION_1_1')) {
                 $curlOpts[CURLOPT_HTTP_VERSION] = CURL_HTTP_VERSION_1_1;
             }
@@ -463,12 +849,15 @@ if (!class_exists('GRNConnectClient')) {
                 'curl_errno'  => (int)$curlErrno,
             ];
 
-            $this->log($opts['category'] ?? 'api', $opts['action'] ?? $method, [
-                'url'     => $url,
-                'method'  => $method,
-                'headers' => ['api-key: ***', 'Content-Type: application/json', 'Accept: application/json'],
-                'body'    => $opts['json'] ?? null,
-            ], $raw, $httpCode, $duration, (int)$curlErrno, (string)$curlErr);
+            // Pretty-print logs of 100-hotel payloads block curl_multi. Skip for listing.
+            if (empty($opts['no_log']) && ($opts['category'] ?? '') !== 'search') {
+                $this->log($opts['category'] ?? 'api', $opts['action'] ?? $method, [
+                    'url'     => $url,
+                    'method'  => $method,
+                    'headers' => ['api-key: ***', 'Content-Type: application/json', 'Accept: application/json'],
+                    'body'    => $opts['json'] ?? null,
+                ], $raw, $httpCode, $duration, (int)$curlErrno, (string)$curlErr);
+            }
 
             if ($curlErr !== '' || (int)$curlErrno !== 0) {
                 $errno = (int)$curlErrno;
@@ -552,7 +941,8 @@ if (!class_exists('GRNConnectClient')) {
         {
             return $this->request('POST', 'api/v3/hotels/bookings', [
                 'json'     => $payload,
-                'timeout'  => max($this->requestTimeout, 45),
+                'timeout'  => max($this->requestTimeout, 90),
+                'no_retry' => true,   // Never retry booking POST (double-booking risk).
                 'category' => 'issue',
                 'action'   => 'booking',
             ]);
@@ -606,7 +996,7 @@ if (!class_exists('GRNConnectClient')) {
         public function countries()
         {
             return $this->request('GET', 'api/v3/countries', [
-                'static' => true, 'category' => 'content', 'action' => 'countries', 'timeout' => 120,
+                'static' => true, 'category' => 'content', 'action' => 'countries', 'timeout' => 120, 'no_log' => true,
             ]);
         }
 
@@ -617,17 +1007,46 @@ if (!class_exists('GRNConnectClient')) {
                 $query['country'] = $countryCode;
             }
             return $this->request('GET', 'api/v3/cities/', [
-                'static' => true, 'query' => $query, 'category' => 'content', 'action' => 'cities', 'timeout' => 180,
+                'static' => true, 'query' => $query, 'category' => 'content', 'action' => 'cities', 'timeout' => 180, 'no_log' => true,
             ]);
         }
 
-        public function hotelsByCity($cityCode)
+        public function hotelsByCity($cityCode, $timeout = 300)
         {
             return $this->request('GET', 'api/v3/hotels/', [
                 'static' => true,
                 'query'  => ['city' => $cityCode, 'version' => self::STATIC_VERSION],
-                'category' => 'content', 'action' => 'hotels_by_city', 'timeout' => 300,
+                'category' => 'content', 'action' => 'hotels_by_city', 'timeout' => (int)$timeout,
             ]);
+        }
+
+        /**
+         * Fetch hotel static lists for several city codes at once (small waves).
+         *
+         * @param string[] $cityCodes
+         * @return array results aligned with $cityCodes
+         */
+        public function hotelsByCityParallel(array $cityCodes, $timeout = 90)
+        {
+            $jobs = [];
+            foreach ($cityCodes as $cityCode) {
+                $cityCode = trim((string)$cityCode);
+                if ($cityCode === '') {
+                    continue;
+                }
+                $jobs[] = [
+                    'method' => 'GET',
+                    'path'   => 'api/v3/hotels/',
+                    'opts'   => [
+                        'static'   => true,
+                        'query'    => ['city' => $cityCode, 'version' => self::STATIC_VERSION],
+                        'category' => 'content',
+                        'action'   => 'hotels_by_city',
+                        'timeout'  => (int)$timeout,
+                    ],
+                ];
+            }
+            return $this->requestMulti($jobs);
         }
 
         public function hotelsByCountry($countryCode)
@@ -641,11 +1060,40 @@ if (!class_exists('GRNConnectClient')) {
 
         public function hotel($hotelCode)
         {
-            return $this->request('GET', 'api/v3/hotels', [
+            return $this->request('GET', 'api/v3/hotels/', [
                 'static' => true,
                 'query'  => ['hcode' => $hotelCode, 'version' => self::STATIC_VERSION],
                 'category' => 'content', 'action' => 'hotel_detail', 'timeout' => 60,
             ]);
+        }
+
+        /**
+         * Static hotel details by code (CDN). Use when live availability has no rate.
+         *
+         * @param string[] $hotelCodes
+         * @return array results aligned with unique non-empty codes
+         */
+        public function hotelsByCodes(array $hotelCodes, $timeout = 60)
+        {
+            $jobs = [];
+            foreach ($hotelCodes as $code) {
+                $code = trim((string)$code);
+                if ($code === '') {
+                    continue;
+                }
+                $jobs[] = [
+                    'method' => 'GET',
+                    'path'   => 'api/v3/hotels/',
+                    'opts'   => [
+                        'static'   => true,
+                        'query'    => ['hcode' => $code, 'version' => self::STATIC_VERSION],
+                        'category' => 'content',
+                        'action'   => 'hotel_detail',
+                        'timeout'  => (int)$timeout,
+                    ],
+                ];
+            }
+            return $this->requestMulti($jobs);
         }
 
         public function hotelImages($hotelCode)
@@ -703,8 +1151,12 @@ if (!class_exists('GRNConnectClient')) {
                 }
 
                 $firstCode = (string)($decoded['errors'][0]['code'] ?? '');
-                // If every error is a "soft" no-availability code, treat as empty.
-                if (empty($codes) && in_array($firstCode, $softCodes, true)) {
+                $joined = strtolower(implode(' ', $messages));
+                $softMessage = strpos($joined, 'no details available') !== false
+                    || strpos($joined, 'no hotels available') !== false
+                    || strpos($joined, 'no hotels found') !== false;
+                // Soft codes or "city has no hotels" messages → empty result, not a hard error.
+                if ($softMessage || (empty($codes) && in_array($firstCode, $softCodes, true))) {
                     return null;
                 }
 
@@ -717,15 +1169,29 @@ if (!class_exists('GRNConnectClient')) {
             if (isset($decoded['error']) && !empty($decoded['error'])) {
                 if (is_array($decoded['error'])) {
                     $code = (string)($decoded['error']['code'] ?? '');
-                    if (in_array($code, $softCodes, true)) {
+                    $msg = (string)($decoded['error']['message'] ?? 'GRNConnect API error');
+                    $lower = strtolower($msg);
+                    if (in_array($code, $softCodes, true)
+                        || strpos($lower, 'no details available') !== false
+                        || strpos($lower, 'no hotels available') !== false
+                        || strpos($lower, 'no hotels found') !== false
+                    ) {
                         return null;
                     }
                     return [
                         'code'    => $code ?: 'error',
-                        'message' => (string)($decoded['error']['message'] ?? 'GRNConnect API error'),
+                        'message' => $msg,
                     ];
                 }
-                return ['code' => 'error', 'message' => (string)$decoded['error']];
+                $msg = (string)$decoded['error'];
+                $lower = strtolower($msg);
+                if (strpos($lower, 'no details available') !== false
+                    || strpos($lower, 'no hotels available') !== false
+                    || strpos($lower, 'no hotels found') !== false
+                ) {
+                    return null;
+                }
+                return ['code' => 'error', 'message' => $msg];
             }
 
             return null;

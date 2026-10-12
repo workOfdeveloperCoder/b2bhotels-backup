@@ -8,6 +8,8 @@
 
 global $router;
 
+require_once dirname(__DIR__) . '/hotel_name_query.php';
+require_once __DIR__ . '/content-db.php';
 require_once __DIR__ . '/api.php';
 
 include __DIR__ . '/creds.php';
@@ -87,32 +89,6 @@ if (!function_exists('grnconnect_module')) {
     }
 }
 
-if (!function_exists('grnconnect_content_db')) {
-    /**
-     * Connect to the GRNConnect content database (host/database/username/password
-     * columns of the modules row). Returns a Medoo instance or null.
-     */
-    function grnconnect_content_db($module)
-    {
-        if (empty($module['database'])) {
-            return null;
-        }
-        try {
-            return new \Medoo\Medoo([
-                'type'      => 'mysql',
-                'host'      => $module['host'] ?: 'localhost',
-                'database'  => $module['database'],
-                'username'  => $module['username'] ?? 'root',
-                'password'  => $module['password'] ?? '',
-                'charset'   => 'utf8mb4',
-                'collation' => 'utf8mb4_unicode_ci',
-            ]);
-        } catch (\Throwable $e) {
-            error_log('GRNConnect content DB connection failed: ' . $e->getMessage());
-            return null;
-        }
-    }
-}
 
 if (!function_exists('grnconnect_to_iso_date')) {
     /** Normalize a DD-MM-YYYY or YYYY-MM-DD date to ISO YYYY-MM-DD. */
@@ -170,6 +146,34 @@ if (!function_exists('grnconnect_clean_city_name')) {
     }
 }
 
+if (!function_exists('grnconnect_valid_coords')) {
+    /**
+     * Catalog coordinates that are safe to plot. Does not rewrite stored values.
+     * Rejects NULL/empty, non-numeric, out-of-range, and 0,0 placeholders.
+     */
+    function grnconnect_valid_coords($lat, $lng)
+    {
+        if ($lat === null || $lng === null || $lat === '' || $lng === '') {
+            return false;
+        }
+        if (!is_numeric($lat) || !is_numeric($lng)) {
+            return false;
+        }
+        $lat = (float)$lat;
+        $lng = (float)$lng;
+        if (is_nan($lat) || is_nan($lng) || is_infinite($lat) || is_infinite($lng)) {
+            return false;
+        }
+        if ($lat == 0.0 && $lng == 0.0) {
+            return false;
+        }
+        if ($lat < -90 || $lat > 90 || $lng < -180 || $lng > 180) {
+            return false;
+        }
+        return true;
+    }
+}
+
 if (!function_exists('grnconnect_hotel_select_cols')) {
     function grnconnect_hotel_select_cols()
     {
@@ -177,14 +181,25 @@ if (!function_exists('grnconnect_hotel_select_cols')) {
     }
 }
 
+if (!function_exists('grnconnect_hotel_listing_cols')) {
+    /** Listing search: skip images/facilities LONGTEXT so 100-code lookups stay fast. */
+    function grnconnect_hotel_listing_cols()
+    {
+        return ['hotel_code', 'name', 'address', 'city_code', 'country_code', 'latitude', 'longitude', 'category', 'acc_name'];
+    }
+}
+
 if (!function_exists('grnconnect_hotels_by_codes')) {
     /** Load hotel rows by hotel_code list (preserves order when possible). */
-    function grnconnect_hotels_by_codes($contentDb, array $codes)
+    function grnconnect_hotels_by_codes($contentDb, array $codes, $listingOnly = false)
     {
         $codes = array_values(array_filter(array_map('strval', $codes)));
         if (empty($codes) || !$contentDb) return [];
 
-        $rows = $contentDb->select('grnconnect_hotels', grnconnect_hotel_select_cols(), [
+        $cols = $listingOnly && function_exists('grnconnect_hotel_listing_cols')
+            ? grnconnect_hotel_listing_cols()
+            : grnconnect_hotel_select_cols();
+        $rows = $contentDb->select('grnconnect_hotels', $cols, [
             'hotel_code' => $codes,
         ]) ?: [];
 
@@ -201,44 +216,344 @@ if (!function_exists('grnconnect_hotels_by_codes')) {
     }
 }
 
-if (!function_exists('grnconnect_hotels_by_name')) {
-    /** Search hotels by name (and optional address). */
-    function grnconnect_hotels_by_name($contentDb, $query, $limit = 50, $offset = 0)
+if (!function_exists('grnconnect_fill_catalog_gaps')) {
+    /**
+     * Available hotel codes from a rate response. One indexed lookup on
+     * grnconnect_hotels.hotel_code fills name, address, photos, and facilities
+     * when the rate payload left them out.
+     */
+    function grnconnect_fill_catalog_gaps($contentDb, array $apiHotels, array $localByCode)
     {
-        $needle = trim((string)$query);
-        if ($needle === '' || !$contentDb) return ['rows' => [], 'total' => 0];
+        if (!$contentDb || empty($apiHotels)) {
+            return $localByCode;
+        }
+        $need = [];
+        $apiHasImages = [];
+        foreach ($apiHotels as $hotel) {
+            if (!is_array($hotel)) {
+                continue;
+            }
+            $code = trim((string)($hotel['hotel_code'] ?? ''));
+            if ($code === '') {
+                continue;
+            }
+            $local = $localByCode[$code] ?? [];
+            $apiImages = function_exists('grnconnect_hotel_images')
+                ? grnconnect_hotel_images($hotel['images'] ?? null)
+                : [];
+            $localImages = function_exists('grnconnect_hotel_images')
+                ? grnconnect_hotel_images($local['images'] ?? null)
+                : [];
+            $apiHasImages[$code] = !empty($apiImages);
+            $missingName = trim((string)($hotel['name'] ?? ($local['name'] ?? ''))) === '';
+            $missingAddress = trim((string)($hotel['address'] ?? ($local['address'] ?? ''))) === '';
+            $missingGeo = empty($hotel['geolocation']['latitude']) && ($local['latitude'] ?? '') === '';
+            $missingFacilities = trim((string)($hotel['facilities'] ?? ($local['facilities'] ?? ''))) === '';
+            $missingType = trim((string)($hotel['acc_type'] ?? ($local['acc_name'] ?? ''))) === '';
+            if ($missingName || $missingAddress || $missingGeo || $missingFacilities || $missingType || (empty($apiImages) && empty($localImages))) {
+                $need[$code] = $code;
+            }
+        }
+        if (!$need) {
+            return $localByCode;
+        }
+        $codes = array_values($need);
+        $cols = ['hotel_code', 'name', 'address', 'city_code', 'country_code', 'latitude', 'longitude', 'category', 'images', 'acc_name', 'facilities', 'chain_name'];
+        $colSql = implode(', ', array_map(static function ($c) {
+            return '`' . str_replace('`', '', $c) . '`';
+        }, $cols));
+        $ph = implode(',', array_fill(0, count($codes), '?'));
+        try {
+            $stmt = $contentDb->pdo->prepare(
+                "SELECT {$colSql} FROM grnconnect_hotels WHERE hotel_code IN ({$ph})"
+            );
+            $stmt->execute($codes);
+            foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [] as $row) {
+                $code = (string)($row['hotel_code'] ?? '');
+                if ($code === '') {
+                    continue;
+                }
+                $localByCode[$code] = array_merge($localByCode[$code] ?? [], $row);
+            }
+        } catch (\Throwable $e) {
+            error_log('GRNConnect catalog gap lookup: ' . $e->getMessage());
+            return $localByCode;
+        }
 
-        $where = [
-            'OR' => [
-                'name[~]'    => $needle,
-                'address[~]' => $needle,
-            ],
-        ];
-        $total = (int)$contentDb->count('grnconnect_hotels', $where);
-        $rows  = $contentDb->select('grnconnect_hotels', grnconnect_hotel_select_cols(), array_merge($where, [
-            'ORDER' => ['name' => 'ASC'],
-            'LIMIT' => [$offset, $limit],
-        ])) ?: [];
+        $needImages = [];
+        foreach ($codes as $code) {
+            if (!empty($apiHasImages[$code])) {
+                continue;
+            }
+            $images = $localByCode[$code]['images'] ?? null;
+            if ($images === null || $images === '' || $images === '[]' || $images === 'null') {
+                $needImages[] = $code;
+            }
+        }
+        if (!$needImages) {
+            return $localByCode;
+        }
+        try {
+            $ph = implode(',', array_fill(0, count($needImages), '?'));
+            $stmt = $contentDb->pdo->prepare(
+                "SELECT hotel_code, url FROM grnconnect_hotel_images
+                 WHERE hotel_code IN ({$ph}) AND url IS NOT NULL AND url <> ''
+                 ORDER BY (size_type = 'regular') DESC, main_image DESC, display_order ASC, id ASC"
+            );
+            $stmt->execute($needImages);
+            $grouped = [];
+            foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [] as $row) {
+                $code = (string)($row['hotel_code'] ?? '');
+                $url = trim((string)($row['url'] ?? ''));
+                if ($code !== '' && $url !== '' && !in_array($url, $grouped[$code] ?? [], true)) {
+                    $grouped[$code][] = $url;
+                }
+            }
+            foreach ($grouped as $code => $urls) {
+                if (!isset($localByCode[$code]) || !is_array($localByCode[$code])) {
+                    $localByCode[$code] = ['hotel_code' => $code];
+                }
+                $localByCode[$code]['images'] = $urls;
+            }
+        } catch (\Throwable $e) {
+            error_log('GRNConnect image gap lookup: ' . $e->getMessage());
+        }
+        return $localByCode;
+    }
+}
+
+if (!function_exists('grnconnect_hotels_by_name')) {
+    /**
+     * Hotel-name search against grnconnect_hotels: name LIKE %query%
+     * (and significant tokens, so "&" vs "And" still matches).
+     * Returns every matching hotel_code for the availability call.
+     */
+    function grnconnect_hotels_by_name($contentDb, $query, $limit = 200, $offset = 0)
+    {
+        $needle = preg_replace('/\s+/u', ' ', trim((string)$query));
+        if ($needle === '' || !$contentDb) {
+            return ['rows' => [], 'total' => 0];
+        }
+
+        $limit = max(1, min(5000, (int)$limit));
+        $offset = max(0, (int)$offset);
+        $clause = stays_hotel_name_like_clause($needle, 'name');
+
+        try {
+            $cols = implode(', ', array_map(static function ($c) {
+                return '`' . str_replace('`', '', $c) . '`';
+            }, function_exists('grnconnect_hotel_listing_cols')
+                ? grnconnect_hotel_listing_cols()
+                : ['hotel_code', 'name', 'category', 'city_code', 'country_code']));
+
+            $sql = 'SELECT ' . $cols . ' FROM grnconnect_hotels WHERE ' . $clause['sql']
+                . ' ORDER BY ' . $clause['order_sql'] . ', `name` ASC'
+                . " LIMIT {$limit} OFFSET {$offset}";
+            $stmt = $contentDb->pdo->prepare($sql);
+            $stmt->execute(array_merge($clause['params'], $clause['order_params']));
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+            $total = $offset + count($rows);
+            if (count($rows) >= $limit) {
+                $total += 1;
+            }
+        } catch (\Throwable $e) {
+            error_log('GRNConnect hotels_by_name: ' . $e->getMessage());
+            return ['rows' => [], 'total' => 0];
+        }
 
         return ['rows' => $rows, 'total' => $total];
     }
 }
 
 if (!function_exists('grnconnect_hotels_by_city')) {
-    /** Hotels in a GRN city_code, paginated. */
+    /**
+     * Hotels in one or more GRN city_codes, paginated.
+     *
+     * @param string|array $cityCode
+     */
     function grnconnect_hotels_by_city($contentDb, $cityCode, $limit = 50, $offset = 0)
     {
-        $cityCode = trim((string)$cityCode);
-        if ($cityCode === '' || !$contentDb) return ['rows' => [], 'total' => 0];
+        $codes = is_array($cityCode) ? $cityCode : [$cityCode];
+        $codes = array_values(array_unique(array_filter(array_map(static function ($c) {
+            return trim((string)$c);
+        }, $codes))));
+        if (empty($codes) || !$contentDb) {
+            return ['rows' => [], 'total' => 0];
+        }
 
-        $where = ['city_code' => $cityCode];
-        $total = (int)$contentDb->count('grnconnect_hotels', $where);
-        $rows  = $contentDb->select('grnconnect_hotels', grnconnect_hotel_select_cols(), array_merge($where, [
-            'ORDER' => ['name' => 'ASC'],
-            'LIMIT' => [$offset, $limit],
-        ])) ?: [];
+        $limit = max(1, min(5000, (int)$limit));
+        $offset = max(0, (int)$offset);
+        $placeholders = implode(',', array_fill(0, count($codes), '?'));
+        $cols = '`hotel_code`, `name`, `address`, `category`, `city_code`, `country_code`, `latitude`, `longitude`, `acc_name`';
+
+        try {
+            // No ORDER BY: idx_city range scan + LIMIT. Sorting the whole city
+            // catalog before LIMIT is what made the first /search take ~37s.
+            $sql = "SELECT {$cols} FROM grnconnect_hotels WHERE city_code IN ({$placeholders})
+                    LIMIT {$limit} OFFSET {$offset}";
+            $stmt = $contentDb->pdo->prepare($sql);
+            $stmt->execute($codes);
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+            $total = $offset + count($rows);
+            if (count($rows) >= $limit) {
+                $total += 1;
+            }
+        } catch (\Throwable $e) {
+            error_log('GRNConnect hotels_by_city: ' . $e->getMessage());
+            return ['rows' => [], 'total' => 0];
+        }
 
         return ['rows' => $rows, 'total' => $total];
+    }
+}
+
+if (!function_exists('grnconnect_hotels_by_country')) {
+    /**
+     * Hotels whose country_code or city.country_code matches Iceland / IS / ISL / Icel.
+     *
+     * @param string[] $countryTokens
+     */
+    function grnconnect_hotels_by_country($contentDb, array $countryTokens, $limit = 50, $offset = 0)
+    {
+        $tokens = array_values(array_unique(array_filter(array_map(static function ($c) {
+            return trim((string)$c);
+        }, $countryTokens))));
+        if (empty($tokens) || !$contentDb) {
+            return ['rows' => [], 'total' => 0];
+        }
+
+        $limit = max(1, min(5000, (int)$limit));
+        $offset = max(0, (int)$offset);
+        $ph = implode(',', array_fill(0, count($tokens), '?'));
+        $cols = '`hotel_code`, `name`, `address`, `category`, `city_code`, `country_code`, `latitude`, `longitude`, `acc_name`';
+
+        try {
+            $cityCodes = [];
+            $cityStmt = $contentDb->pdo->prepare(
+                "SELECT city_code FROM grnconnect_cities WHERE country_code IN ({$ph})"
+            );
+            $cityStmt->execute($tokens);
+            while ($code = $cityStmt->fetchColumn()) {
+                if ($code) {
+                    $cityCodes[(string)$code] = true;
+                }
+            }
+            $cityList = array_keys($cityCodes);
+
+            if ($cityList) {
+                $phCities = implode(',', array_fill(0, count($cityList), '?'));
+                $sql = "SELECT {$cols} FROM grnconnect_hotels
+                        WHERE country_code IN ({$ph}) OR city_code IN ({$phCities})
+                        LIMIT {$limit} OFFSET {$offset}";
+                $stmt = $contentDb->pdo->prepare($sql);
+                $stmt->execute(array_merge($tokens, $cityList));
+            } else {
+                $sql = "SELECT {$cols} FROM grnconnect_hotels
+                        WHERE country_code IN ({$ph})
+                        LIMIT {$limit} OFFSET {$offset}";
+                $stmt = $contentDb->pdo->prepare($sql);
+                $stmt->execute($tokens);
+            }
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+            $total = $offset + count($rows);
+            if (count($rows) >= $limit) {
+                $total += 1;
+            }
+        } catch (\Throwable $e) {
+            error_log('GRNConnect hotels_by_country: ' . $e->getMessage());
+            return ['rows' => [], 'total' => 0];
+        }
+
+        return ['rows' => $rows, 'total' => $total];
+    }
+}
+
+if (!function_exists('grnconnect_exact_countries_for_dest')) {
+    /**
+     * Country-wide search only when destination is exactly a country name or ISO code.
+     *
+     * @return array<int, array{code:string,code3:string,name:string,tokens:string[]}>
+     */
+    function grnconnect_exact_countries_for_dest($contentDb, $needle)
+    {
+        $needle = trim((string)$needle);
+        if ($needle === '' || !$contentDb || !function_exists('grnconnect_matched_countries')) {
+            return [];
+        }
+        $matched = grnconnect_matched_countries($contentDb->pdo, $needle, $needle . '%');
+        $exact = [];
+        foreach ($matched as $row) {
+            $name = (string)($row['name'] ?? '');
+            $code = (string)($row['code'] ?? '');
+            $c3 = (string)($row['code3'] ?? '');
+            if (
+                strcasecmp($name, $needle) === 0
+                || strcasecmp($code, $needle) === 0
+                || ($c3 !== '' && strcasecmp($c3, $needle) === 0)
+            ) {
+                $exact[] = $row;
+            }
+        }
+        return $exact;
+    }
+}
+
+if (!function_exists('grnconnect_city_codes_for_name')) {
+    /**
+     * All GRN city_codes for a place like "Dubai": exact, "Dubai, …",
+     * "Dubai (…)", "Dubai Marina", etc. Largest catalog first.
+     * Empty city codes (no hotels) are skipped.
+     *
+     * @return string[]
+     */
+    function grnconnect_city_codes_for_name($contentDb, $needle)
+    {
+        $needle = trim((string)$needle);
+        if ($needle === '' || !$contentDb) {
+            return [];
+        }
+        $fetch = static function ($sql, array $params) use ($contentDb) {
+            $stmt = $contentDb->pdo->prepare($sql);
+            $stmt->execute($params);
+            $codes = [];
+            while ($code = $stmt->fetchColumn()) {
+                if ($code) {
+                    $codes[] = (string)$code;
+                }
+            }
+            return $codes;
+        };
+        try {
+            $codes = $fetch(
+                'SELECT city_code FROM grnconnect_cities
+                 WHERE name = ? OR search_name = ?
+                 LIMIT 5',
+                [$needle, $needle]
+            );
+            if (!empty($codes)) {
+                return $codes;
+            }
+            return $fetch(
+                'SELECT city_code FROM grnconnect_cities
+                 WHERE name LIKE ? OR search_name LIKE ?
+                 LIMIT 5',
+                [$needle . '%', $needle . '%']
+            );
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+}
+
+if (!function_exists('grnconnect_best_city_code_for_name')) {
+    /**
+     * Main city for a name like "Dubai": exact name / "Dubai, …" search_name,
+     * preferring the GRN city_code that has the most hotels (whole city, not a district).
+     */
+    function grnconnect_best_city_code_for_name($contentDb, $needle)
+    {
+        $codes = grnconnect_city_codes_for_name($contentDb, $needle);
+        return $codes[0] ?? '';
     }
 }
 
@@ -249,32 +564,90 @@ if (!function_exists('grnconnect_resolve_city_code')) {
         if (!$contentDb) return '';
 
         $destinationCode = trim((string)$destinationCode);
-        $destination     = trim((string)$destination);
+        $needle = grnconnect_clean_city_name($destination);
+
+        if ($needle !== '') {
+            $best = grnconnect_best_city_code_for_name($contentDb, $needle);
+            if ($best !== '') {
+                return $best;
+            }
+        }
 
         if ($destinationCode !== '' && !ctype_alpha($destinationCode)) {
-            $row = $contentDb->get('grnconnect_cities', ['city_code'], ['city_code' => $destinationCode]);
-            if ($row) return (string)$row['city_code'];
+            $row = $contentDb->get('grnconnect_cities', ['city_code', 'name', 'search_name'], ['city_code' => $destinationCode]);
+            if ($row) {
+                $cityName = strtolower(trim(explode(',', (string)($row['name'] ?: $row['search_name'] ?: ''))[0]));
+                $needleLower = strtolower($needle);
+                if ($needleLower === '' || $cityName === $needleLower) {
+                    return (string)$row['city_code'];
+                }
+            }
         }
-        if ($destination !== '' && ctype_digit($destination)) {
-            $row = $contentDb->get('grnconnect_cities', ['city_code'], ['city_code' => $destination]);
-            if ($row) return (string)$row['city_code'];
+
+        return '';
+    }
+}
+
+if (!function_exists('grnconnect_city_from_hotel_query')) {
+    /**
+     * Hotel-name query → GRN city_code (same city search as typing "Dubai").
+     * Prefer the matched hotel's city_code; else an exact city token in the query.
+     */
+    function grnconnect_city_from_hotel_query($contentDb, $destination, $hotelCode = '')
+    {
+        if (!$contentDb) {
+            return '';
+        }
+        $hotelCode = trim((string)$hotelCode);
+        if ($hotelCode !== '') {
+            $rows = grnconnect_hotels_by_codes($contentDb, [$hotelCode]);
+            $code = trim((string)($rows[0]['city_code'] ?? ''));
+            if ($code !== '') {
+                return $code;
+            }
         }
 
-        $needle = grnconnect_clean_city_name($destination);
-        if ($needle === '') return '';
+        $dest = preg_replace('/\s+/u', ' ', trim((string)$destination));
+        if ($dest !== '') {
+            $found = grnconnect_hotels_by_name($contentDb, $dest, 5, 0);
+            $code = trim((string)($found['rows'][0]['city_code'] ?? ''));
+            if ($code !== '') {
+                return $code;
+            }
+        }
 
-        $city = $contentDb->get('grnconnect_cities', ['city_code', 'search_name', 'name'], [
-            'OR' => [
-                'search_name'    => $needle,
-                'name'           => $needle,
-                'search_name[~]' => $needle,
-                'name[~]'        => $needle,
-            ],
-            'ORDER' => ['search_name' => 'ASC'],
-            'LIMIT' => 1,
-        ]);
+        $stop = ['hotel', 'hotels', 'suites', 'suite', 'apartments', 'apartment', 'resort', 'inn', 'the', 'and', 'of', 'at'];
+        $words = preg_split('/\s+/u', $dest, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $candidates = [];
+        for ($i = 0; $i < count($words); $i++) {
+            if (mb_strlen($words[$i]) < 3) {
+                continue;
+            }
+            $candidates[] = $words[$i];
+            if (isset($words[$i + 1]) && mb_strlen($words[$i + 1]) >= 2) {
+                $candidates[] = $words[$i] . ' ' . $words[$i + 1];
+            }
+        }
+        usort($candidates, static function ($a, $b) {
+            return mb_strlen($b) <=> mb_strlen($a);
+        });
+        foreach ($candidates as $token) {
+            if (in_array(strtolower($token), $stop, true)) {
+                continue;
+            }
+            $exact = $contentDb->get('grnconnect_cities', ['city_code'], [
+                'OR' => [
+                    'search_name' => $token,
+                    'name'        => $token,
+                ],
+                'LIMIT' => 1,
+            ]);
+            if ($exact && !empty($exact['city_code'])) {
+                return (string)$exact['city_code'];
+            }
+        }
 
-        return $city ? (string)$city['city_code'] : '';
+        return '';
     }
 }
 
@@ -401,7 +774,7 @@ if (!function_exists('grnconnect_resolve_search_hotels')) {
      */
     function grnconnect_resolve_search_hotels($contentDb, $db, array $input, $batchSize = 50, $page = 1)
     {
-        $batchSize = max(1, min(100, (int)$batchSize));
+        $batchSize = max(1, min(5000, (int)$batchSize));
         $page      = max(1, (int)$page);
         $offset    = ($page - 1) * $batchSize;
 
@@ -420,16 +793,43 @@ if (!function_exists('grnconnect_resolve_search_hotels')) {
 
         $meta = ['destination' => $dest, 'radius_km' => $radius];
 
-        // Hotel mode only — never let a leftover hotel_code hijack city/auto searches
+        // Hotel-name search: ALL hotels whose names match %query% in grnconnect_hotels.
         if ($mode === 'hotel') {
+            $named = [];
+            $total = 0;
+            if ($dest !== '') {
+                $byName = grnconnect_hotels_by_name($contentDb, $dest, $batchSize, $offset);
+                $named = $byName['rows'] ?? [];
+                $total = (int)($byName['total'] ?? count($named));
+            }
             if ($hotelCode !== '') {
-                $rows = grnconnect_hotels_by_codes($contentDb, [$hotelCode]);
-                if (!empty($rows)) {
-                    return ['mode' => 'hotel', 'rows' => $rows, 'total' => count($rows), 'meta' => $meta];
+                $fromCode = grnconnect_hotels_by_codes($contentDb, [$hotelCode]);
+                if (!empty($fromCode)) {
+                    $have = [];
+                    foreach ($named as $row) {
+                        $have[(string)($row['hotel_code'] ?? '')] = true;
+                    }
+                    if ($offset === 0 && empty($have[$hotelCode])) {
+                        array_unshift($named, $fromCode[0]);
+                        $total = max($total, count($named));
+                    } elseif (empty($named)) {
+                        $named = $fromCode;
+                        $total = count($named);
+                    }
                 }
             }
-            $found = grnconnect_hotels_by_name($contentDb, $dest !== '' ? $dest : $hotelCode, $batchSize, $offset);
-            return ['mode' => 'hotel', 'rows' => $found['rows'], 'total' => $found['total'], 'meta' => $meta];
+            $cityCode = trim((string)($named[0]['city_code'] ?? ''));
+            if ($cityCode === '') {
+                $cityCode = grnconnect_city_from_hotel_query($contentDb, $dest, $hotelCode);
+            }
+            $meta['city_code'] = $cityCode;
+            $meta['hotel_query'] = $dest;
+            if ($hotelCode !== '') {
+                $meta['hotel_code'] = $hotelCode;
+            } elseif (!empty($named[0]['hotel_code'])) {
+                $meta['hotel_code'] = (string)$named[0]['hotel_code'];
+            }
+            return ['mode' => 'hotel', 'rows' => $named, 'total' => $total, 'meta' => $meta];
         }
 
         // Explicit circle (coords required)
@@ -460,20 +860,81 @@ if (!function_exists('grnconnect_resolve_search_hotels')) {
             // Fall through to city if location has no coords
         }
 
-        // City mode (explicit) or auto — city first
+        // City mode (explicit) or auto — all matching city_codes, not one district
         if ($mode === 'city' || $mode === 'auto' || $mode === 'location') {
-            $cityCode = grnconnect_resolve_city_code($contentDb, $dest, $destCode);
-            if ($cityCode !== '') {
-                $found = grnconnect_hotels_by_city($contentDb, $cityCode, $batchSize, $offset);
-                $meta['city_code'] = $cityCode;
-                return ['mode' => 'city', 'rows' => $found['rows'], 'total' => $found['total'], 'meta' => $meta];
+            $needle = function_exists('grnconnect_clean_city_name')
+                ? grnconnect_clean_city_name($dest)
+                : trim($dest);
+            $pickedCity = ($destCode !== '' && !ctype_alpha($destCode));
+
+            if (
+                !$pickedCity
+                && $needle !== ''
+                && function_exists('grnconnect_has_city_named')
+                && !grnconnect_has_city_named($contentDb->pdo, $needle)
+                && function_exists('grnconnect_exact_countries_for_dest')
+            ) {
+                $countries = grnconnect_exact_countries_for_dest($contentDb, $needle);
+                $tokens = function_exists('grnconnect_country_tokens')
+                    ? grnconnect_country_tokens($countries)
+                    : [];
+                if ($tokens && function_exists('grnconnect_hotels_by_country')) {
+                    $found = grnconnect_hotels_by_country($contentDb, $tokens, $batchSize, $offset);
+                    $meta['country'] = (string)($countries[0]['name'] ?? $needle);
+                    $meta['country_codes'] = $tokens;
+                    $meta['city_code'] = '';
+                    return ['mode' => 'city', 'rows' => $found['rows'], 'total' => $found['total'], 'meta' => $meta];
+                }
             }
-            if ($mode === 'city') {
-                return ['mode' => 'city', 'rows' => [], 'total' => 0, 'meta' => $meta];
+
+            $cityCodes = [];
+            if ($pickedCity) {
+                $cityCodes[] = $destCode;
+            }
+            if ($needle !== '') {
+                foreach (grnconnect_city_codes_for_name($contentDb, $needle) as $c) {
+                    if ($c !== '' && !in_array($c, $cityCodes, true)) {
+                        $cityCodes[] = $c;
+                    }
+                }
+            }
+            $cityCodes = array_slice($cityCodes, 0, 8);
+            if (empty($cityCodes)) {
+                $one = grnconnect_resolve_city_code($contentDb, $dest, $destCode);
+                if ($one !== '') {
+                    $cityCodes = [$one];
+                }
+            }
+            if (!empty($cityCodes)) {
+                $found = grnconnect_hotels_by_city($contentDb, $cityCodes, $batchSize, $offset);
+                $meta['city_code'] = $cityCodes[0];
+                $meta['city_codes'] = $cityCodes;
+                if ($found['total'] > 0 || $mode === 'city') {
+                    if ($found['total'] > 0) {
+                        return ['mode' => 'city', 'rows' => $found['rows'], 'total' => $found['total'], 'meta' => $meta];
+                    }
+                }
             }
         }
 
-        // AUTO fallbacks: location circle → hotel name
+        // Hotel-name search from the catalog (also when the listing sent search_type=city).
+        if ($mode === 'auto' || $mode === 'city') {
+            if ($dest !== '') {
+                $byName = grnconnect_hotels_by_name($contentDb, $dest, $batchSize, $offset);
+                $named = $byName['rows'] ?? [];
+                if (!empty($named)) {
+                    $cityCode = trim((string)($named[0]['city_code'] ?? ''));
+                    if ($cityCode === '') {
+                        $cityCode = grnconnect_city_from_hotel_query($contentDb, $dest, $hotelCode);
+                    }
+                    $meta['city_code'] = $cityCode;
+                    $meta['hotel_query'] = $dest;
+                    $meta['hotel_code'] = (string)($named[0]['hotel_code'] ?? '');
+                    return ['mode' => 'hotel', 'rows' => $named, 'total' => (int)($byName['total'] ?? count($named)), 'meta' => $meta];
+                }
+            }
+        }
+
         if ($mode === 'auto') {
             $coords = grnconnect_resolve_location_coords($db, $dest);
             if ($coords) {
@@ -481,13 +942,6 @@ if (!function_exists('grnconnect_resolve_search_hotels')) {
                 if ($found['total'] > 0) {
                     $meta = array_merge($meta, $coords);
                     return ['mode' => 'location', 'rows' => $found['rows'], 'total' => $found['total'], 'meta' => $meta];
-                }
-            }
-
-            if ($dest !== '') {
-                $found = grnconnect_hotels_by_name($contentDb, $dest, $batchSize, $offset);
-                if ($found['total'] > 0) {
-                    return ['mode' => 'hotel', 'rows' => $found['rows'], 'total' => $found['total'], 'meta' => $meta];
                 }
             }
         }
@@ -507,14 +961,16 @@ if (!function_exists('grnconnect_resolve_all_search_hotels')) {
     {
         $maxHotels = defined('GRNCONNECT_SEARCH_MAX_HOTELS')
             ? (int)GRNCONNECT_SEARCH_MAX_HOTELS
-            : 3000;
-        $maxHotels = max(100, min(10000, $maxHotels));
+            : 5000;
+        $maxHotels = max(100, min(5000, $maxHotels));
+        $modeHint = strtolower(trim((string)($input['search_type'] ?? $input['mode'] ?? 'auto')));
+        if ($modeHint === 'hotel') {
+            $maxHotels = min($maxHotels, 800);
+        }
 
-        // First resolve with a large page to get total + first slice.
-        // grnconnect_resolve_search_hotels clamps batchSize to 100, so we page
-        // through content DB until we have everything (or hit the cap).
+        // One query for city search (up to 2000). Page only if a slice is requested.
         $page = 1;
-        $batchSize = 100;
+        $batchSize = $maxHotels;
         $allRows = [];
         $mode = 'none';
         $meta = [];
@@ -553,6 +1009,36 @@ if (!function_exists('grnconnect_resolve_all_search_hotels')) {
     }
 }
 
+if (!function_exists('grnconnect_listing_price')) {
+    /**
+     * Apply markup + FX using two MARKUP() samples cached per request/user.
+     * Avoids a users/currencies query for every hotel in a wave.
+     */
+    function grnconnect_listing_price($basePrice, $module, $db, $fromCurrency, $toCurrency)
+    {
+        static $cache = [];
+        $basePrice = (float)$basePrice;
+        if ($basePrice <= 0) {
+            return 0.0;
+        }
+        $ck = (string)($_SESSION['user_id'] ?? 'g')
+            . '|' . (string)($_SESSION['user_role'] ?? '')
+            . '|' . (string)($fromCurrency ?: '')
+            . '|' . (string)($toCurrency ?: '')
+            . '|' . (string)($module['id'] ?? '');
+        if (!isset($cache[$ck])) {
+            $p1 = MARKUP(100.0, $module, $db, $fromCurrency, $toCurrency);
+            $p2 = MARKUP(200.0, $module, $db, $fromCurrency, $toCurrency);
+            $y1 = (float)($p1['price'] ?? 100);
+            $y2 = (float)($p2['price'] ?? 200);
+            $a = ($y2 - $y1) / 100.0;
+            $b = $y1 - $a * 100.0;
+            $cache[$ck] = ['a' => $a, 'b' => $b];
+        }
+        return round($cache[$ck]['a'] * $basePrice + $cache[$ck]['b'], 2);
+    }
+}
+
 if (!function_exists('grnconnect_format_listing_hotel')) {
     /**
      * Map a GRN availability hotel + local content row into PHPTRAVELS listing shape.
@@ -579,9 +1065,16 @@ if (!function_exists('grnconnect_format_listing_hotel')) {
         $rateCurrency = $rate['currency'] ?? $currency;
         $finalPrice   = $basePrice;
         try {
-            $mk = MARKUP($basePrice, $module, $db, $rateCurrency, $currency);
-            if (isset($mk['price']) && $mk['price'] > 0) {
-                $finalPrice = $mk['price'];
+            $mkPrice = function_exists('grnconnect_listing_price')
+                ? grnconnect_listing_price($basePrice, $module, $db, $rateCurrency, $currency)
+                : null;
+            if ($mkPrice !== null && $mkPrice > 0) {
+                $finalPrice = $mkPrice;
+            } else {
+                $mk = MARKUP($basePrice, $module, $db, $rateCurrency, $currency);
+                if (isset($mk['price']) && $mk['price'] > 0) {
+                    $finalPrice = $mk['price'];
+                }
             }
         } catch (\Throwable $e) { /* keep base */ }
 
@@ -607,6 +1100,25 @@ if (!function_exists('grnconnect_format_listing_hotel')) {
             ? grnconnect_format_promotions($rate)
             : ['discount_percentage' => 0, 'label' => '', 'text' => '', 'details' => [], 'has_promotion' => false];
 
+        $mealLabels = [];
+        $rateRows = [];
+        if (!empty($hotel['rates']) && is_array($hotel['rates'])) {
+            foreach ($hotel['rates'] as $rateRow) {
+                if (is_array($rateRow)) {
+                    $rateRows[] = $rateRow;
+                }
+            }
+        }
+        if (is_array($rate)) {
+            $rateRows[] = $rate;
+        }
+        foreach ($rateRows as $rateRow) {
+            $mealLabel = trim((string)grnconnect_meal_plan($rateRow));
+            if ($mealLabel !== '') {
+                $mealLabels[$mealLabel] = $mealLabel;
+            }
+        }
+
         $item = [
             'id'                  => $code,
             'hotel_id'            => $code,
@@ -628,6 +1140,7 @@ if (!function_exists('grnconnect_format_listing_hotel')) {
             'original_price'      => round($basePrice, 2),
             'currency'            => $currency,
             'meal'                => grnconnect_meal_plan($rate),
+            'meals'               => array_values($mealLabels),
             'sid'                 => $sid,
             'has_available_rooms' => true,
             'accommodation_type'  => $accommodationType,
@@ -648,6 +1161,63 @@ if (!function_exists('grnconnect_format_listing_hotel')) {
         }
 
         return $item;
+    }
+}
+
+if (!function_exists('grnconnect_format_content_listing_hotel')) {
+    /**
+     * Listing card from local content only (no live rate).
+     * Used for hotel-name search so the hotel still appears when availability is empty.
+     */
+    function grnconnect_format_content_listing_hotel(array $local, $destination, $currency, $nights, $resolvedMode = 'hotel')
+    {
+        $code = (string)($local['hotel_code'] ?? '');
+        if ($code === '') {
+            return null;
+        }
+        $images = [];
+        if (!empty($local['images'])) {
+            $images = function_exists('grnconnect_hotel_images')
+                ? grnconnect_hotel_images($local['images'])
+                : [];
+        }
+        $nights = max(1, (int)$nights);
+        $name = $local['name'] ?? 'Hotel';
+        $address = $local['address'] ?? '';
+        $acc = trim((string)($local['acc_name'] ?? ''));
+        if ($acc === '') {
+            $acc = 'Hotel';
+        }
+        return [
+            'id'                  => $code,
+            'hotel_id'            => $code,
+            'original_id'         => $code,
+            'name'                => $name,
+            'stars'               => (float)($local['category'] ?? 0),
+            'star_rating'         => (float)($local['category'] ?? 0),
+            'rating'              => (float)($local['category'] ?? 0),
+            'address'             => $address,
+            'city'                => $destination,
+            'country'             => $local['country_code'] ?? '',
+            'location'            => trim((string)($destination ?: $address)),
+            'latitude'            => isset($local['latitude']) ? (float)$local['latitude'] : null,
+            'longitude'           => isset($local['longitude']) ? (float)$local['longitude'] : null,
+            'images'              => $images,
+            'image'               => $images[0] ?? '',
+            'price'               => 0,
+            'price_per_night'     => 0,
+            'original_price'      => 0,
+            'currency'            => $currency,
+            'meal'                => '',
+            'sid'                 => '',
+            'has_available_rooms' => false,
+            'accommodation_type'  => $acc,
+            'amenities'           => function_exists('grnconnect_parse_facilities')
+                ? grnconnect_parse_facilities($local['facilities'] ?? '')
+                : [],
+            'supplier'            => 'grnconnect',
+            'search_mode'         => $resolvedMode,
+        ];
     }
 }
 
@@ -674,8 +1244,47 @@ if (!function_exists('grnconnect_search_session_path')) {
     }
 }
 
+if (!function_exists('grnconnect_search_lock_path')) {
+    function grnconnect_search_lock_path($token)
+    {
+        $path = grnconnect_search_session_path($token);
+        return $path === '' ? '' : ($path . '.lock');
+    }
+}
+
+if (!function_exists('grnconnect_search_try_lock')) {
+    function grnconnect_search_try_lock($token, $blocking = false)
+    {
+        $path = grnconnect_search_lock_path($token);
+        if ($path === '') {
+            return null;
+        }
+        $fp = @fopen($path, 'c');
+        if ($fp === false) {
+            return null;
+        }
+        $mode = $blocking ? LOCK_EX : (LOCK_EX | LOCK_NB);
+        if (!flock($fp, $mode)) {
+            fclose($fp);
+            return null;
+        }
+        return $fp;
+    }
+}
+
+if (!function_exists('grnconnect_search_unlock')) {
+    function grnconnect_search_unlock($fp)
+    {
+        if (!$fp) {
+            return;
+        }
+        @flock($fp, LOCK_UN);
+        @fclose($fp);
+    }
+}
+
 if (!function_exists('grnconnect_search_session_save')) {
-    function grnconnect_search_session_save($token, array $state)
+    function grnconnect_search_session_save($token, array $state, $prune = false)
     {
         $path = grnconnect_search_session_path($token);
         if ($path === '') {
@@ -686,8 +1295,9 @@ if (!function_exists('grnconnect_search_session_save')) {
         if ($ok !== false) {
             @chmod($path, 0666);
         }
-        // Best-effort prune of stale sessions (>35 min — search_id TTL is 30)
-        grnconnect_search_session_prune(35 * 60);
+        if ($prune) {
+            grnconnect_search_session_prune(35 * 60);
+        }
         return $ok !== false;
     }
 }
@@ -741,8 +1351,12 @@ if (!function_exists('grnconnect_merge_batch_hotels')) {
         $nights,
         $module,
         $db,
-        $resolvedMode = ''
+        $resolvedMode = '',
+        $contentDb = null
     ) {
+        if ($contentDb) {
+            $localByCode = grnconnect_fill_catalog_gaps($contentDb, $apiHotels, $localByCode);
+        }
         $upserted = [];
         foreach ($apiHotels as $hotel) {
             if (!is_array($hotel)) {
@@ -1213,6 +1827,28 @@ if (!function_exists('grnconnect_meal_plan')) {
     }
 }
 
+if (!function_exists('grnconnect_board_code')) {
+    /** Map a GRN rate onto ROOM ONLY, BB, HB, FB, or AI. */
+    function grnconnect_board_code($rate)
+    {
+        $meal = strtolower(grnconnect_meal_plan($rate));
+        $compact = str_replace([' ', '-', '_'], '', $meal);
+        if (str_contains($compact, 'allinclusive') || str_contains($compact, 'allinclusion')) {
+            return 'AI';
+        }
+        if (str_contains($compact, 'fullboard') || (str_contains($meal, 'breakfast') && str_contains($meal, 'lunch') && str_contains($meal, 'dinner'))) {
+            return 'FB';
+        }
+        if (str_contains($compact, 'halfboard') || (str_contains($meal, 'breakfast') && (str_contains($meal, 'dinner') || str_contains($meal, 'lunch')))) {
+            return 'HB';
+        }
+        if (str_contains($meal, 'breakfast') || !empty($rate['includes_boarding'])) {
+            return 'BB';
+        }
+        return 'RO';
+    }
+}
+
 if (!function_exists('grnconnect_format_policy_datetime')) {
     /** Display datetime as "31 Jul 2026, 07:29 PM IST". */
     function grnconnect_format_policy_datetime($value)
@@ -1431,10 +2067,19 @@ if (!function_exists('grnconnect_parse_refetch_hotel')) {
             return ['search_id' => $searchId, 'hotel' => null, 'rates' => [], 'city_code' => ''];
         }
 
+        $rates = [];
+        if (!empty($hotel['rates']) && is_array($hotel['rates'])) {
+            $rates = array_values($hotel['rates']);
+        } elseif (!empty($hotel['rate']) && is_array($hotel['rate'])) {
+            $rates = isset($hotel['rate']['rate_key'])
+                ? [$hotel['rate']]
+                : array_values($hotel['rate']);
+        }
+
         return [
             'search_id' => $searchId,
             'hotel'     => $hotel,
-            'rates'     => is_array($hotel['rates'] ?? null) ? $hotel['rates'] : [],
+            'rates'     => $rates,
             'city_code' => (string)($hotel['city_code'] ?? ''),
         ];
     }
@@ -1444,7 +2089,9 @@ if (!function_exists('grnconnect_rate_display_name')) {
     /** Display label for a rate (single room or bundled multi-room package). */
     function grnconnect_rate_display_name(array $rate)
     {
-        $roomsInfo = $rate['rooms'] ?? [];
+        $roomsInfo = function_exists('grnconnect_rate_rooms_nodes')
+            ? grnconnect_rate_rooms_nodes($rate)
+            : ($rate['rooms'] ?? []);
         if (!is_array($roomsInfo) || empty($roomsInfo)) {
             return 'Room';
         }
@@ -1452,9 +2099,9 @@ if (!function_exists('grnconnect_rate_display_name')) {
         $names = [];
         foreach ($roomsInfo as $roomInfo) {
             if (!is_array($roomInfo)) continue;
-            $name = trim((string)($roomInfo['description'] ?? ($roomInfo['room_type'] ?? '')));
-            if ($name === '') $name = 'Room';
-            $names[] = $name;
+            $names[] = function_exists('grnconnect_rate_room_title')
+                ? grnconnect_rate_room_title($roomInfo)['title']
+                : (trim((string)($roomInfo['room_type'] ?? ($roomInfo['description'] ?? 'Room'))) ?: 'Room');
         }
 
         if (empty($names)) return 'Room';
@@ -1468,7 +2115,9 @@ if (!function_exists('grnconnect_rate_occupancy')) {
     {
         $adults   = 0;
         $children = 0;
-        $rooms    = is_array($rate['rooms'] ?? null) ? $rate['rooms'] : [];
+        $rooms    = function_exists('grnconnect_rate_rooms_nodes')
+            ? grnconnect_rate_rooms_nodes($rate)
+            : (is_array($rate['rooms'] ?? null) ? $rate['rooms'] : []);
 
         foreach ($rooms as $roomInfo) {
             if (!is_array($roomInfo)) continue;
@@ -1780,29 +2429,108 @@ if (!function_exists('grnconnect_format_safe2stay')) {
     }
 }
 
+if (!function_exists('grnconnect_is_rate_room_node')) {
+    /** True when $item is one GRN rooms[] occupancy slot, not a list of rooms. */
+    function grnconnect_is_rate_room_node($item)
+    {
+        if (!is_array($item)) {
+            return false;
+        }
+        return array_key_exists('room_type', $item)
+            || array_key_exists('description', $item)
+            || array_key_exists('no_of_adults', $item)
+            || array_key_exists('room_reference', $item)
+            || array_key_exists('bed_types', $item)
+            || array_key_exists('max_room_occupancy', $item);
+    }
+}
+
+if (!function_exists('grnconnect_rate_rooms_nodes')) {
+    /**
+     * GRN bundled packages list one rooms[] node per room type in the package.
+     * Mixed packages (Twin + Suite) are two different nodes on one rate_key.
+     * A list (index 0, 1, …) is never collapsed into the first room.
+     */
+    function grnconnect_rate_rooms_nodes(array $rate)
+    {
+        $raw = $rate['rooms'] ?? null;
+        if (!is_array($raw) || $raw === []) {
+            return [];
+        }
+
+        $isList = array_key_exists(0, $raw) && is_array($raw[0]);
+        if (!$isList && grnconnect_is_rate_room_node($raw)) {
+            return [$raw];
+        }
+
+        $nodes = [];
+        foreach ($raw as $item) {
+            if (is_array($item) && grnconnect_is_rate_room_node($item)) {
+                $nodes[] = $item;
+            }
+        }
+        return $nodes;
+    }
+}
+
+if (!function_exists('grnconnect_rate_room_title')) {
+    /**
+     * GRN portal uses room_type as the room name ("Deluxe Twin Room (Marina View)")
+     * and description as the rate line. Numeric room_type values are supplier codes.
+     */
+    function grnconnect_rate_room_title(array $roomInfo)
+    {
+        $roomType = trim((string)($roomInfo['room_type'] ?? ''));
+        $desc     = trim((string)($roomInfo['description'] ?? ''));
+        if ($roomType !== '' && preg_match('/^\d+$/', $roomType)) {
+            $roomType = '';
+        }
+        $title = $roomType !== '' ? $roomType : $desc;
+        if ($title === '') {
+            $title = 'Room';
+        }
+        return ['title' => $title, 'description' => $desc];
+    }
+}
+
 if (!function_exists('grnconnect_format_rate_rooms')) {
-    /** Per-room details for bundled / multi-room rates. */
+    /**
+     * One UI room per GRN rooms[] node, names copied as returned.
+     * Mixed packages stay mixed: Room 1 Twin, Room 2 Suite.
+     * Same-type packages may set no_of_rooms=2 on a single node; that is repeated.
+     */
     function grnconnect_format_rate_rooms(array $rate)
     {
+        $nodes = grnconnect_rate_rooms_nodes($rate);
+        $meal  = function_exists('grnconnect_meal_plan') ? grnconnect_meal_plan($rate) : '';
         $rooms = [];
-        foreach ($rate['rooms'] ?? [] as $idx => $roomInfo) {
-            if (!is_array($roomInfo)) continue;
+        $index = 0;
 
+        foreach ($nodes as $roomInfo) {
+            $names = grnconnect_rate_room_title($roomInfo);
+            $copies = max(1, (int)($roomInfo['no_of_rooms'] ?? 1));
             $childrenAges = $roomInfo['children_ages'] ?? [];
-            if (!is_array($childrenAges)) $childrenAges = [];
+            if (!is_array($childrenAges)) {
+                $childrenAges = [];
+            }
 
-            $rooms[] = [
-                'index'             => $idx + 1,
-                'room_type'         => (string)($roomInfo['room_type'] ?? ''),
-                'description'       => (string)($roomInfo['description'] ?? ''),
-                'room_reference'    => (string)($roomInfo['room_reference'] ?? ''),
-                'no_of_adults'      => (int)($roomInfo['no_of_adults'] ?? 0),
-                'no_of_children'    => (int)($roomInfo['no_of_children'] ?? 0),
-                'children_ages'     => array_values(array_map('intval', $childrenAges)),
-                'bed_types'         => is_array($roomInfo['bed_types'] ?? null) ? $roomInfo['bed_types'] : [],
-                'max_room_occupancy'=> is_array($roomInfo['max_room_occupancy'] ?? null) ? $roomInfo['max_room_occupancy'] : [],
-                'pax_label'         => grnconnect_room_pax_label($roomInfo),
-            ];
+            for ($copy = 0; $copy < $copies; $copy++) {
+                $index++;
+                $rooms[] = [
+                    'index'               => $index,
+                    'title'               => $names['title'],
+                    'room_type'          => $names['title'],
+                    'description'        => $names['description'],
+                    'meal_plan'          => $meal,
+                    'room_reference'     => (string)($roomInfo['room_reference'] ?? ''),
+                    'no_of_adults'       => (int)($roomInfo['no_of_adults'] ?? 0),
+                    'no_of_children'     => (int)($roomInfo['no_of_children'] ?? 0),
+                    'children_ages'      => array_values(array_map('intval', $childrenAges)),
+                    'bed_types'          => is_array($roomInfo['bed_types'] ?? null) ? $roomInfo['bed_types'] : [],
+                    'max_room_occupancy' => is_array($roomInfo['max_room_occupancy'] ?? null) ? $roomInfo['max_room_occupancy'] : [],
+                    'pax_label'          => grnconnect_room_pax_label($roomInfo),
+                ];
+            }
         }
         return $rooms;
     }
@@ -1838,9 +2566,12 @@ if (!function_exists('grnconnect_rate_room_signature')) {
     function grnconnect_rate_room_signature(array $rate)
     {
         $parts = [];
-        foreach ($rate['rooms'] ?? [] as $room) {
+        foreach (function_exists('grnconnect_rate_rooms_nodes') ? grnconnect_rate_rooms_nodes($rate) : ($rate['rooms'] ?? []) as $room) {
             if (!is_array($room)) continue;
-            $name = strtolower(trim((string)($room['room_type'] ?? $room['description'] ?? 'room')));
+            $names = function_exists('grnconnect_rate_room_title')
+                ? grnconnect_rate_room_title($room)
+                : ['title' => strtolower(trim((string)($room['room_type'] ?? $room['description'] ?? 'room')))];
+            $name = strtolower(trim((string)($names['title'] ?? 'room')));
             $name = preg_replace('/\s+/', ' ', $name);
             $parts[] = implode(':', [
                 $name,
@@ -1907,6 +2638,38 @@ if (!function_exists('grnconnect_format_promotions')) {
     }
 }
 
+if (!function_exists('grnconnect_rate_row_label')) {
+    /**
+     * Short label for a rate row so Special Deal / Standard prices
+     * are distinguishable under the same room card.
+     */
+    function grnconnect_rate_row_label(array $rate, array $promotion = [])
+    {
+        $desc = '';
+        $first = $rate['rooms'][0] ?? [];
+        if (is_array($first)) {
+            $desc = trim((string)($first['description'] ?? ''));
+        }
+
+        $bits = [];
+        if (stripos($desc, 'Special Deal') !== false) {
+            $bits[] = 'Special Deal';
+        } elseif (preg_match('/\bStandard\b/i', $desc)) {
+            $bits[] = 'Standard';
+        }
+
+        if (preg_match('/(\d+(?:\.\d+)?)\s*%/', $desc, $m)) {
+            $pct = (string)$m[1];
+            if (strpos($pct, '.') !== false) {
+                $pct = rtrim(rtrim($pct, '0'), '.');
+            }
+            $bits[] = $pct . '% off';
+        }
+
+        return implode(' · ', $bits);
+    }
+}
+
 if (!function_exists('grnconnect_build_room_option')) {
     /** Normalize a GRN rate into the frontend rooms option contract. */
     function grnconnect_build_room_option(array $rate, array $ctx)
@@ -1943,6 +2706,9 @@ if (!function_exists('grnconnect_build_room_option')) {
         $rateRooms      = grnconnect_format_rate_rooms($rate);
         $safe2stay      = grnconnect_format_safe2stay($rate) ?? $hotelSafe2stay;
         $promotion      = grnconnect_format_promotions($rate);
+        $rateLabel      = function_exists('grnconnect_rate_row_label')
+            ? grnconnect_rate_row_label($rate, $promotion)
+            : '';
         $roomInfo       = $rate['rooms'][0] ?? [];
         $freeCancel     = grnconnect_is_free_cancellation($rate);
 
@@ -1989,6 +2755,15 @@ if (!function_exists('grnconnect_build_room_option')) {
             }
         }
 
+        $occupancyLabel = '';
+        if ($roomsInRate > 1) {
+            $occupancyLabel = $roomsInRate . ' rooms';
+        } elseif (!empty($rateRooms[0]['pax_label'])) {
+            $occupancyLabel = (string)$rateRooms[0]['pax_label'];
+        } else {
+            $occupancyLabel = ($occupancy['adults'] ?? 1) . ' Adult' . (($occupancy['adults'] ?? 1) > 1 ? 's' : '');
+        }
+
         return [
             'option_id'              => $rateKey !== '' ? $rateKey : uniqid('grn_'),
             'package_id'             => $rateKey,
@@ -1996,7 +2771,7 @@ if (!function_exists('grnconnect_build_room_option')) {
             'is_package'             => $roomsInRate > 1,
             'rate_key'               => $token,
             'board_name'             => grnconnect_meal_plan($rate),
-            'board_code'             => !empty($rate['includes_boarding']) ? 'BB' : 'RO',
+            'board_code'             => grnconnect_board_code($rate),
             'meal_plan'              => grnconnect_meal_plan($rate),
             'boarding_details'       => is_array($rate['boarding_details'] ?? null) ? $rate['boarding_details'] : [],
             'cancellation_free'      => $freeCancel ? 1 : 0,
@@ -2032,11 +2807,9 @@ if (!function_exists('grnconnect_build_room_option')) {
             'package_rooms'          => $rateRooms,
             'rooms_in_rate'          => $roomsInRate,
             'mixable'                => !empty($ctx['mixable']) && $roomsInRate <= 1,
-            'occupancy_label'        => !empty($rateRooms[0]['pax_label'])
-                ? (string)$rateRooms[0]['pax_label']
-                : (($occupancy['adults'] ?? 1) . ' Adult' . (($occupancy['adults'] ?? 1) > 1 ? 's' : '')),
-            'for_adults'             => (int)($rateRooms[0]['no_of_adults'] ?? $occupancy['adults'] ?? 1),
-            'for_children'           => (int)($rateRooms[0]['no_of_children'] ?? $occupancy['children'] ?? 0),
+            'occupancy_label'        => $occupancyLabel,
+            'for_adults'             => (int)($occupancy['adults'] ?? 1),
+            'for_children'           => (int)($occupancy['children'] ?? 0),
             'max_room_occupancy'     => is_array($roomInfo['max_room_occupancy'] ?? null)
                 ? $roomInfo['max_room_occupancy']
                 : [
@@ -2046,6 +2819,8 @@ if (!function_exists('grnconnect_build_room_option')) {
             'available_quantity'     => 1,
             'supports_cancellation'  => !empty($rate['supports_cancellation']),
             'supports_amendment'     => !empty($rate['supports_amendment']),
+            'rate_label'             => $rateLabel,
+            'room_type_label'        => $roomName,
             'promotions_details'     => $promotion['details'],
             'promotion_text'         => $promotion['text'],
             'promotion_label'        => $promotion['label'],
@@ -2056,56 +2831,6 @@ if (!function_exists('grnconnect_build_room_option')) {
             'pan_required'           => !empty($rate['pan_required']),
             'rate_type'              => (string)($rate['rate_type'] ?? 'bookable'),
             'group_code'             => (string)($rate['group_code'] ?? ''),
-        ];
-    }
-}
-
-if (!function_exists('grnconnect_rate_room_references')) {
-    /** Room references for this rate_key, in rooms[] order (duplicates kept). */
-    function grnconnect_rate_room_references(array $rate)
-    {
-        $refs = [];
-        foreach ($rate['rooms'] ?? [] as $room) {
-            if (!is_array($room)) {
-                continue;
-            }
-            $ref = trim((string)($room['room_reference'] ?? ''));
-            if ($ref !== '') {
-                $refs[] = $ref;
-            }
-        }
-        return $refs;
-    }
-}
-
-if (!function_exists('grnconnect_slim_rate_snapshot')) {
-    /**
-     * Keep only the fields issue.php needs. Full GRN rate + raw snapshots
-     * can overflow bookings.booking_data and drop room_references.
-     */
-    function grnconnect_slim_rate_snapshot(array $rate)
-    {
-        $rooms = [];
-        foreach ($rate['rooms'] ?? [] as $room) {
-            if (!is_array($room)) {
-                continue;
-            }
-            $rooms[] = [
-                'room_reference' => (string)($room['room_reference'] ?? ''),
-                'room_type'      => (string)($room['room_type'] ?? ($room['description'] ?? '')),
-                'no_of_adults'   => (int)($room['no_of_adults'] ?? 0),
-                'no_of_children' => (int)($room['no_of_children'] ?? 0),
-                'children_ages'  => is_array($room['children_ages'] ?? null) ? array_values($room['children_ages']) : [],
-            ];
-        }
-        return [
-            'rate_key'     => (string)($rate['rate_key'] ?? ''),
-            'group_code'   => (string)($rate['group_code'] ?? ''),
-            'room_code'    => (string)($rate['room_code'] ?? ''),
-            'no_of_rooms'  => (int)($rate['no_of_rooms'] ?? count($rooms)),
-            'price'        => isset($rate['price']) ? (float)$rate['price'] : 0.0,
-            'currency'     => (string)($rate['currency'] ?? ''),
-            'rooms'        => $rooms,
         ];
     }
 }
@@ -2228,6 +2953,56 @@ if (!function_exists('grnconnect_resolve_fresh_bundled_rate')) {
     }
 }
 
+if (!function_exists('grnconnect_rate_room_references')) {
+    /** Room references for this rate_key, in rooms[] order (duplicates kept). */
+    function grnconnect_rate_room_references(array $rate)
+    {
+        $refs = [];
+        foreach ($rate['rooms'] ?? [] as $room) {
+            if (!is_array($room)) {
+                continue;
+            }
+            $ref = trim((string)($room['room_reference'] ?? ''));
+            if ($ref !== '') {
+                $refs[] = $ref;
+            }
+        }
+        return $refs;
+    }
+}
+
+if (!function_exists('grnconnect_slim_rate_snapshot')) {
+    /**
+     * Keep only the fields issue.php needs. Full GRN rate + raw snapshots
+     * can overflow bookings.booking_data and drop room_references.
+     */
+    function grnconnect_slim_rate_snapshot(array $rate)
+    {
+        $rooms = [];
+        foreach ($rate['rooms'] ?? [] as $room) {
+            if (!is_array($room)) {
+                continue;
+            }
+            $rooms[] = [
+                'room_reference' => (string)($room['room_reference'] ?? ''),
+                'room_type'      => (string)($room['room_type'] ?? ($room['description'] ?? '')),
+                'no_of_adults'   => (int)($room['no_of_adults'] ?? 0),
+                'no_of_children' => (int)($room['no_of_children'] ?? 0),
+                'children_ages'  => is_array($room['children_ages'] ?? null) ? array_values($room['children_ages']) : [],
+            ];
+        }
+        return [
+            'rate_key'     => (string)($rate['rate_key'] ?? ''),
+            'group_code'   => (string)($rate['group_code'] ?? ''),
+            'room_code'    => (string)($rate['room_code'] ?? ''),
+            'no_of_rooms'  => (int)($rate['no_of_rooms'] ?? count($rooms)),
+            'price'        => isset($rate['price']) ? (float)$rate['price'] : 0.0,
+            'currency'     => (string)($rate['currency'] ?? ''),
+            'rooms'        => $rooms,
+        ];
+    }
+}
+
 if (!function_exists('grnconnect_booking_rate_rooms')) {
     /**
      * Book one payload room per rooms[] entry from search/refetch/recheck.
@@ -2236,7 +3011,7 @@ if (!function_exists('grnconnect_booking_rate_rooms')) {
     function grnconnect_booking_rate_rooms(array $rate)
     {
         $rooms = [];
-        foreach ($rate['rooms'] ?? [] as $room) {
+        foreach (function_exists('grnconnect_rate_rooms_nodes') ? grnconnect_rate_rooms_nodes($rate) : ($rate['rooms'] ?? []) as $room) {
             if (is_array($room)) {
                 $rooms[] = $room;
             }

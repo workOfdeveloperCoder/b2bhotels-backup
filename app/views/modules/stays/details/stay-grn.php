@@ -208,7 +208,7 @@ $nights = max(1, (int) $checkinDate->diff($checkoutDate)->days);
                                             <template x-for="(age, ageIndex) in room.childAges" :key="ageIndex">
                                                 <select x-model="room.childAges[ageIndex]" class="select text-sm w-full">
                                                     <option value="" disabled>Age</option>
-                                                    <template x-for="age in 11" :key="age">
+                                                    <template x-for="age in 17" :key="age">
                                                         <option :value="age" x-text="age"></option>
                                                     </template>
                                                 </select>

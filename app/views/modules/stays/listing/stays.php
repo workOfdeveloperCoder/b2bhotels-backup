@@ -903,6 +903,9 @@
                 console.log(`🔢 ${supplier}: destination total ${total} (headline: ${this.destinationTotal})`);
             },
             async fetchSupplier(supplier, page = 1, extraParams = {}) {
+                if (String(supplier).toLowerCase() === 'grnconnect') {
+                    return await this.fetchGrnConnectParallel(page, extraParams);
+                }
                 // console.log(`🏨 Calling module: ${supplier} (Page ${page})`, this.searchParams);
                 const perPage = parseInt(extraParams.per_page || 20, 10);
                 // A hotel-name lookup narrows the supplier query, so its total is not
@@ -1141,6 +1144,152 @@
                 }).filter(Boolean);
                 // console.log(`✅ ${supplier}: Successfully normalized ${normalizedHotels.length} hotels`);
                 return normalizedHotels;
+            },
+            buildGrnSearchForm(extra = {}) {
+                const form = new FormData();
+                form.append('destination', this.searchParams.destination);
+                form.append('destination_code', this.searchParams.destination_code);
+                form.append('checkin', this.searchParams.checkin);
+                form.append('checkout', this.searchParams.checkout);
+                form.append('nationality', this.searchParams.nationality || "<?= $_SESSION['hotel_nationality'] ?? '' ?>");
+                form.append('rooms', this.searchParams.rooms);
+                form.append('adults', this.searchParams.adults);
+                form.append('children', this.searchParams.children);
+                form.append('rooms_data', this.searchParams.rooms_data);
+                form.append('currency', this.searchParams.currency);
+                form.append('language', this.searchParams.language);
+                Object.keys(extra || {}).forEach((key) => {
+                    if (String(key).startsWith('__')) return;
+                    if (extra[key] !== undefined && extra[key] !== null && String(extra[key]).trim() !== '') {
+                        form.append(key, extra[key]);
+                    }
+                });
+                return form;
+            },
+            applyGrnSearchChunk(json) {
+                if (!json || typeof json !== 'object') return;
+                if (typeof json.total === 'number' && json.total > (this.grandTotal || 0) && json.search_complete !== true) {
+                    this.grandTotal = json.total;
+                }
+                const updates = (Array.isArray(json.results) ? json.results : []).filter((hotel) => {
+                    return hotel && hotel.has_available_rooms !== false && (parseFloat(hotel.price) || 0) > 0;
+                });
+                if (updates.length) {
+                    this.mergeOrUpdateGrnHotels(this.normalizeHotels(updates, 'grnconnect'));
+                    if (this.loading && this.filteredHotels.length > 0) {
+                        this.loading = false;
+                    }
+                }
+                if (json.search_complete === true) {
+                    this.keepAvailableGrnHotels();
+                }
+            },
+            keepAvailableGrnHotels() {
+                const next = this.hotels.filter((h) => {
+                    if (String(h.supplier || '').toLowerCase() !== 'grnconnect') return true;
+                    return (parseFloat(h.price) || 0) > 0 && h.has_available_rooms !== false;
+                });
+                this.hotels = next;
+                this.grandTotal = next.length;
+                this.extractFilters();
+                this.sortAndFilterResults();
+            },
+            mergeOrUpdateGrnHotels(newHotels) {
+                if (!newHotels || !newHotels.length) return;
+                let changed = false;
+                newHotels.forEach((hotel) => {
+                    const key = String(hotel.original_id || '');
+                    const idx = this.hotels.findIndex(
+                        (h) => String(h.supplier).toLowerCase() === 'grnconnect' && String(h.original_id) === key
+                    );
+                    if (idx >= 0) {
+                        this.hotels.splice(idx, 1, hotel);
+                    } else {
+                        this.hotels.push(hotel);
+                    }
+                    changed = true;
+                });
+                if (changed) {
+                    this.updatePriceRange();
+                    this.extractFilters();
+                    this.sortAndFilterResults();
+                }
+            },
+            async streamGrnConnectSearch(applyChunk, extra = {}) {
+                const apply = typeof applyChunk === 'function' ? applyChunk : (json) => this.applyGrnSearchChunk(json);
+                const res = await fetch(`<?=root?>modules/stays/grnconnect/search`, {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/x-ndjson' },
+                    body: this.buildGrnSearchForm(Object.assign({ stream: '1' }, extra || {}))
+                });
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const ctype = String(res.headers.get('content-type') || '').toLowerCase();
+                if (!res.body || (!ctype.includes('ndjson') && !ctype.includes('event-stream'))) {
+                    const json = JSON.parse(await res.text());
+                    if (json.status === 'error') {
+                        throw new Error(json.message || 'GRNConnect search failed');
+                    }
+                    return { mode: 'json', json };
+                }
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                let complete = false;
+                const consumeLine = (line) => {
+                    line = String(line || '').trim();
+                    if (!line) return;
+                    if (line.startsWith('data:')) line = line.slice(5).trim();
+                    if (line.charAt(0) !== '{') return;
+                    let json;
+                    try { json = JSON.parse(line); } catch (e) { return; }
+                    if (json.status === 'error') {
+                        complete = true;
+                        return;
+                    }
+                    apply(json);
+                    if (json.search_complete === true) complete = true;
+                };
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, { stream: true });
+                    let idx;
+                    while ((idx = buf.indexOf('\n')) >= 0) {
+                        const line = buf.slice(0, idx);
+                        buf = buf.slice(idx + 1);
+                        consumeLine(line);
+                    }
+                }
+                if (buf.trim()) consumeLine(buf);
+                return { mode: 'stream', complete };
+            },
+            async fetchGrnConnectParallel(page = 1, extraParams = {}) {
+                if (page > 1) {
+                    this.hasMorePages['grnconnect'] = false;
+                    return [];
+                }
+                this.hasMorePages['grnconnect'] = false;
+                this.currentPage['grnconnect'] = 1;
+                const gen = (this._grnCollectGen = (this._grnCollectGen || 0) + 1);
+                try {
+                    const streamed = await this.streamGrnConnectSearch((json) => {
+                        if (this._grnCollectGen !== gen) return;
+                        this.applyGrnSearchChunk(json);
+                    }, extraParams);
+                    if (this._grnCollectGen === gen && streamed && streamed.mode === 'json' && streamed.json) {
+                        this.applyGrnSearchChunk(streamed.json);
+                    }
+                } catch (err) {
+                    console.warn('⚠️ grnconnect search failed:', err.message);
+                } finally {
+                    if (this._grnCollectGen === gen) {
+                        this.keepAvailableGrnHotels();
+                        this.loading = false;
+                    }
+                }
+                return [];
             },
             generateDescription(hotel) {
                 // Simple description based on available data

@@ -18,8 +18,11 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
         require_once __DIR__ . '/../api.php';
         require_once __DIR__ . '/../selection.php';
         require_once __DIR__ . '/../validation.php';
+        if (is_file(__DIR__ . '/../pay-later.php')) {
+            require_once __DIR__ . '/../pay-later.php';
+        }
 
-        $returnConfirmed = function ($reference, $bookingId, $booking) use ($invoiceId) {
+        $returnConfirmed = function ($reference, $bookingId, $booking) use ($invoiceId, &$bookingData) {
             return [
                 'status'            => true,
                 'success'           => true,
@@ -30,14 +33,27 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                 'message'           => 'Booking completed successfully',
                 'invoice_id'        => $invoiceId,
                 'response_error'    => '',
+                'pay_later'         => is_array($bookingData ?? null) ? ($bookingData['pay_later'] ?? null) : null,
                 'data'              => [
                     'booking_id'        => $booking['id'],
                     'invoice_id'        => $invoiceId,
                     'pnr'               => $reference,
                     'grn_booking_id'    => $bookingId,
                     'status'            => 'confirmed',
+                    'pay_later'         => is_array($bookingData ?? null) ? ($bookingData['pay_later'] ?? null) : null,
                 ],
             ];
+        };
+
+        $issueLog = function ($step, $detail = '') use ($invoiceId) {
+            if (function_exists('grnconnect_log')) {
+                grnconnect_log('issue', 'trace', [
+                    'invoice_id' => $invoiceId,
+                    'step'       => $step,
+                    'detail'     => $detail,
+                ], null, $invoiceId);
+            }
+            error_log("GRN Issue [{$invoiceId}] {$step}" . ($detail !== '' ? ": {$detail}" : ''));
         };
 
         try {
@@ -47,14 +63,23 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
             $booking = $db->get('bookings', '*', ['invoice_id' => $invoiceId, 'module' => 'grnconnect']);
             if (!$booking) throw new Exception('Booking not found');
 
-            // Already confirmed?
-            if (($booking['booking_status'] ?? '') === 'confirmed' && !empty($booking['pnr'])) {
-                $bd = json_decode($booking['booking_data'], true) ?: [];
-                return $returnConfirmed($booking['pnr'], $bd['grn_booking_id'] ?? null, $booking);
-            }
-
             $bookingData = json_decode($booking['booking_data'], true);
             if (!is_array($bookingData)) throw new Exception('Invalid booking data');
+
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
+
+            // Already issued: fetch GRN status instead of booking again.
+            if (!empty($booking['pnr'])) {
+                $synced = grnconnect_sync_issued_booking($db, $booking, $bookingData);
+                if (is_array($synced)) {
+                    return $synced;
+                }
+                if (($booking['booking_status'] ?? '') === 'confirmed') {
+                    return $returnConfirmed($booking['pnr'], $bookingData['grn_booking_id'] ?? null, $booking);
+                }
+            }
 
             $module = grnconnect_module($db);
             if (!$module) throw new Exception('GRNConnect module not found');
@@ -175,19 +200,15 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                     throw new Exception('GRNConnect recheck returned no rooms for this rate. Please search again and reselect rooms.');
                 }
 
-                // One rate_key = exactly the rooms GRN returned for that key.
-                $allocNeeded = max(1, count($matchRooms), (int)($finalRate['no_of_rooms'] ?? 0));
-
                 grnconnect_assert_recheck_bookable(
                     $finalRate,
                     is_array($rechecked['raw'] ?? null) ? $rechecked['raw'] : [],
                     $token,
-                    $allocNeeded
+                    max(1, count($matchRooms), (int)($finalRate['no_of_rooms'] ?? 0))
                 );
                 $issueNet = function_exists('grnconnect_rate_price_total')
                     ? (float)grnconnect_rate_price_total($finalRate)
                     : (float)($finalRate['price'] ?? 0);
-                // Compare against checkout-accepted price if user confirmed a change
                 $checkoutMeta = $checkoutRecheck;
                 grnconnect_assert_issue_price_accepted($checkoutMeta, $issueNet);
 
@@ -361,6 +382,34 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
             ];
 
             // ---- Booking payload ------------------------------------------
+            // AT_WEB is GRN agent credit. A successful book deducts the
+            // supplier rate from the GRN balance. Use the rate's own type
+            // when the rate does not allow AT_WEB.
+            $paymentType = 'AT_WEB';
+            $allowedTypes = [];
+            foreach (($bookingData['rooms_data'] ?? []) as $roomOption) {
+                if (!is_array($roomOption)) {
+                    continue;
+                }
+                $option = is_array($roomOption['option'] ?? null) ? $roomOption['option'] : $roomOption;
+                $types = $option['payment_type'] ?? [];
+                if (is_string($types) && $types !== '') {
+                    $types = [$types];
+                }
+                if (!is_array($types)) {
+                    continue;
+                }
+                foreach ($types as $type) {
+                    $type = strtoupper(trim((string) $type));
+                    if ($type !== '') {
+                        $allowedTypes[$type] = true;
+                    }
+                }
+            }
+            if ($allowedTypes && empty($allowedTypes['AT_WEB'])) {
+                $paymentType = (string) array_key_first($allowedTypes);
+            }
+
             $payload = [
                 'search_id'        => $searchId,
                 'hotel_code'       => $hotelCode,
@@ -370,7 +419,7 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                 'agent_reference'  => $invoiceId,
                 'checkin'          => $checkin,
                 'checkout'         => $checkout,
-                'payment_type'     => 'AT_WEB',
+                'payment_type'     => $paymentType,
                 'purpose_of_travel'=> 1,
                 'holder'           => $holder,
                 'booking_items'    => $bookingItems,
@@ -393,12 +442,18 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                 }
             }
 
-            $db->update('bookings', [
-                'booking_status' => 'processing',
-                'updated_at'     => date('Y-m-d H:i:s'),
-            ], ['id' => $booking['id']]);
+            $isPayLater = function_exists('grnconnect_booking_is_pay_later')
+                && grnconnect_booking_is_pay_later($db, $booking);
+            $issueLog('pre_book', 'isPayLater=' . ($isPayLater ? 'Y' : 'N') . ' items=' . count($bookingItems));
+            if (!$isPayLater) {
+                $db->update('bookings', [
+                    'booking_status' => 'processing',
+                    'updated_at'     => date('Y-m-d H:i:s'),
+                ], ['id' => $booking['id']]);
+            }
 
             $res = $client->book($payload);
+            $issueLog('post_book', 'success=' . ($res['success'] ? 'Y' : 'N') . ' http=' . ($res['http_code'] ?? '?') . ' curl_errno=' . ($res['curl_errno'] ?? '?') . ' error=' . ($res['error'] ?? ''));
 
             if (!$res['success']) {
                 $db->update('bookings', [
@@ -409,23 +464,50 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                 throw new Exception('GRNConnect booking failed: ' . ($res['error'] ?: 'unknown error'));
             }
 
-            $data = $res['data'];
-            // Booking payload may be at top level or under "booking"/"bookings"[0].
-            $node = $data['booking'] ?? ($data['bookings'][0] ?? $data);
-            $reference     = $node['booking_reference'] ?? $data['booking_reference'] ?? '';
+            $data = is_array($res['data'] ?? null) ? $res['data'] : [];
+            [$data, $node] = grnconnect_unwrap_booking_payload($data);
+            $reference     = trim((string)($node['booking_reference'] ?? $data['booking_reference'] ?? ''));
             $grnBookingId  = $node['booking_id'] ?? $data['booking_id'] ?? '';
-            $bookingStatus = strtolower($node['booking_status'] ?? $data['booking_status'] ?? '');
+            // GRN booking_status (or legacy `status`) is Confirmed/Failed/Pending.
+            // Do NOT use payment_status — AT_WEB Pay Later is payment pending, booking confirmed.
+            $bookingStatus = grnconnect_extract_booking_status($node, $data);
 
             if ($reference === '') {
-                $db->update('bookings', [
-                    'booking_status' => 'processing',
-                    'error_response' => json_encode($data),
-                    'updated_at'     => date('Y-m-d H:i:s'),
-                ], ['id' => $booking['id']]);
+                if (!$isPayLater) {
+                    $db->update('bookings', [
+                        'booking_status' => 'processing',
+                        'error_response' => json_encode($data),
+                        'updated_at'     => date('Y-m-d H:i:s'),
+                    ], ['id' => $booking['id']]);
+                }
                 throw new Exception('GRNConnect booking response missing booking_reference. Check with GRN Ops before marking failed.');
             }
 
-            if (in_array($bookingStatus, ['pending', 'processing', ''], true)) {
+            if ($isPayLater && $reference !== '' && in_array($bookingStatus, ['pending', 'processing', ''], true)) {
+                $fetch = $client->getBooking($reference, 'GRN');
+                if (empty($fetch['success'])) {
+                    $agentFetch = $client->getBookingByAgentRef($invoiceId);
+                    if (!empty($agentFetch['success'])) {
+                        $fetch = $agentFetch;
+                    }
+                }
+                if (!empty($fetch['success'])) {
+                    $fetchData = is_array($fetch['data'] ?? null) ? $fetch['data'] : [];
+                    [$fetchData, $fetched] = grnconnect_unwrap_booking_payload($fetchData);
+                    $liveStatus = grnconnect_extract_booking_status($fetched, $fetchData);
+                    $liveRef = trim((string)($fetched['booking_reference'] ?? $fetchData['booking_reference'] ?? $reference));
+                    if ($liveRef !== '') {
+                        $reference = $liveRef;
+                    }
+                    if ($liveStatus !== '') {
+                        $bookingStatus = $liveStatus;
+                        $data = $fetchData;
+                        $node = $fetched;
+                    }
+                }
+            }
+
+            if (!$isPayLater && in_array($bookingStatus, ['pending', 'processing', ''], true)) {
                 for ($attempt = 0; $attempt < 12; $attempt++) {
                     sleep(5);
                     $fetch = $client->getBooking($reference, 'GRN');
@@ -437,20 +519,23 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                     }
                     if (!$fetch['success']) continue;
 
-                    $fetched = $fetch['data']['booking'] ?? ($fetch['data']['bookings'][0] ?? $fetch['data']);
-                    if (!is_array($fetched)) continue;
+                    $fetchData = is_array($fetch['data'] ?? null) ? $fetch['data'] : [];
+                    [$fetchData, $fetched] = grnconnect_unwrap_booking_payload($fetchData);
+                    if (!is_array($fetched) || $fetched === []) continue;
 
-                    $liveStatus = strtolower($fetched['booking_status'] ?? '');
-                    $liveRef    = $fetched['booking_reference'] ?? $reference;
+                    $liveStatus = grnconnect_extract_booking_status($fetched, $fetchData);
+                    $liveRef    = trim((string)($fetched['booking_reference'] ?? $fetchData['booking_reference'] ?? $reference));
                     if ($liveRef !== '') $reference = $liveRef;
                     if ($liveStatus === 'confirmed') {
                         $bookingStatus = 'confirmed';
-                        $data = $fetch['data'];
+                        $data = $fetchData;
+                        $node = $fetched;
                         break;
                     }
                     if (in_array($liveStatus, ['failed', 'rejected', 'cancelled'], true)) {
                         $bookingStatus = $liveStatus;
-                        $data = $fetch['data'];
+                        $data = $fetchData;
+                        $node = $fetched;
                         break;
                     }
                 }
@@ -459,6 +544,9 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
             $bookingData['grn_booking_id']        = $grnBookingId;
             $bookingData['grn_booking_reference'] = $reference;
             $bookingData['grn_search_id']         = $searchId;
+            if (function_exists('grnconnect_attach_pay_later_dates')) {
+                grnconnect_attach_pay_later_dates($bookingData, $db, $data, $booking);
+            }
 
             if (in_array($bookingStatus, ['failed', 'rejected'], true)) {
                 $db->update('bookings', [
@@ -471,7 +559,7 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                 throw new Exception('GRNConnect booking was rejected by supplier.');
             }
 
-            $finalStatus = ($bookingStatus === 'confirmed') ? 'confirmed' : 'processing';
+            $finalStatus = grnconnect_map_local_booking_status($bookingStatus, $reference !== '', $isPayLater);
 
             $db->update('bookings', [
                 'booking_status'   => $finalStatus,
@@ -492,12 +580,14 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
                     'message'           => 'Booking submitted and pending supplier confirmation. Reference saved.',
                     'invoice_id'        => $invoiceId,
                     'response_error'    => '',
+                    'pay_later'         => $bookingData['pay_later'] ?? null,
                     'data'              => [
                         'booking_id'        => $booking['id'],
                         'invoice_id'        => $invoiceId,
                         'pnr'               => $reference,
                         'grn_booking_id'    => $grnBookingId,
                         'status'            => 'processing',
+                        'pay_later'         => $bookingData['pay_later'] ?? null,
                     ],
                 ];
             }
@@ -507,6 +597,7 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
         } catch (Exception $e) {
             if (isset($booking['id'])) {
                 $db->update('bookings', [
+                    'booking_status' => 'failed',
                     'error_response' => json_encode([
                         'error'     => 'exception',
                         'message'   => $e->getMessage(),
@@ -534,6 +625,101 @@ if (!function_exists('grnconnect_issue_booking_logic')) {
 // ----------------------------------------------------------------------------
 // HELPERS
 // ----------------------------------------------------------------------------
+
+if (!function_exists('grnconnect_unwrap_booking_payload')) {
+    /**
+     * Normalize GRN book/fetch JSON: envelope {status, data}, booking, or bookings[0].
+     * @return array{0: array, 1: array} [root, node]
+     */
+    function grnconnect_unwrap_booking_payload($decoded)
+    {
+        if (!is_array($decoded)) {
+            return [[], []];
+        }
+        $root = $decoded;
+        if (isset($decoded['data']) && is_array($decoded['data'])) {
+            $inner = $decoded['data'];
+            if (isset($inner['booking_reference'])
+                || isset($inner['booking_status'])
+                || isset($inner['booking'])
+                || isset($inner['bookings'])
+                || isset($inner['status'])
+            ) {
+                $root = $inner;
+            }
+        }
+        $node = $root['booking'] ?? null;
+        if (!is_array($node) && isset($root['bookings'][0]) && is_array($root['bookings'][0])) {
+            $node = $root['bookings'][0];
+        }
+        if (!is_array($node)) {
+            $node = $root;
+        }
+        return [$root, $node];
+    }
+}
+
+if (!function_exists('grnconnect_extract_booking_status')) {
+    /**
+     * GRN hotel book/fetch: booking_status or legacy status (confirmed/failed/pending).
+     * Never uses payment_status (AT_WEB Pay Later is payment pending, booking confirmed).
+     */
+    function grnconnect_extract_booking_status($node, $root = [])
+    {
+        $node = is_array($node) ? $node : [];
+        $root = is_array($root) ? $root : [];
+        $candidates = [
+            $node['booking_status'] ?? null,
+            $root['booking_status'] ?? null,
+            $node['status'] ?? null,
+            $root['status'] ?? null,
+        ];
+        $valid = ['confirmed', 'failed', 'rejected', 'cancelled', 'canceled', 'pending', 'processing', 'vouchered', 'ticketed'];
+        foreach ($candidates as $raw) {
+            $s = strtolower(trim((string)$raw));
+            if ($s === '') {
+                continue;
+            }
+            if (in_array($s, ['success', 'ok', 'fail', 'error'], true)) {
+                continue;
+            }
+            if (strpos($s, 'confirm') !== false) {
+                return 'confirmed';
+            }
+            if (in_array($s, $valid, true)) {
+                return $s === 'canceled' ? 'cancelled' : $s;
+            }
+        }
+        return '';
+    }
+}
+
+if (!function_exists('grnconnect_map_local_booking_status')) {
+    /**
+     * Map GRN hotel status to local bookings.booking_status.
+     * Payment stays unpaid for Pay Later; that is not booking pending.
+     */
+    function grnconnect_map_local_booking_status($grnStatus, $hasReference = false, $isPayLater = false)
+    {
+        $s = strtolower(trim((string)$grnStatus));
+        if (in_array($s, ['failed', 'rejected'], true)) {
+            return 'failed';
+        }
+        if (in_array($s, ['cancelled', 'canceled'], true)) {
+            return 'cancelled';
+        }
+        if ($s === 'confirmed' || $s === 'vouchered' || $s === 'ticketed' || strpos($s, 'confirm') !== false) {
+            return 'confirmed';
+        }
+        if ($isPayLater && $hasReference) {
+            return 'confirmed';
+        }
+        if ($hasReference) {
+            return 'processing';
+        }
+        return 'pending';
+    }
+}
 
 if (!function_exists('grnconnect_match_rate')) {
     /**
@@ -618,21 +804,33 @@ if (!function_exists('grnconnect_pax_title')) {
      * Normalize a title to a GRNConnect-accepted value.
      * GRNConnect v3 ONLY accepts: "Mr.", "Ms.", "Mrs.", "Mstr." (note the dot).
      */
-    function grnconnect_pax_title($title)
+    function grnconnect_pax_title($title, $forChild = false)
     {
         $key = strtolower(rtrim(trim((string)$title), '.'));
         $map = [
-            'mr'     => 'Mr.',
-            'mrs'    => 'Mrs.',
-            'ms'     => 'Ms.',
-            'miss'   => 'Ms.',
-            'mstr'   => 'Mstr.',
-            'master' => 'Mstr.',
-            'mr.'    => 'Mr.',
-            'mrs.'   => 'Mrs.',
-            'ms.'    => 'Ms.',
+            'mr'        => 'Mr.',
+            'mrs'       => 'Mrs.',
+            'ms'        => 'Ms.',
+            'miss'      => 'Ms.',
+            'mstr'      => 'Mstr.',
+            'master'    => 'Mstr.',
+            'dr'        => 'Mr.',
+            'prof'      => 'Mr.',
+            'professor' => 'Mr.',
+            'mister'    => 'Mr.',
+            'sir'       => 'Mr.',
+            'madam'     => 'Ms.',
+            'madame'    => 'Mrs.',
         ];
-        return $map[$key] ?? 'Mr.';
+        $mapped = $map[$key] ?? null;
+        $allowed = ['Mr.', 'Ms.', 'Mrs.', 'Mstr.'];
+        if ($mapped === null || !in_array($mapped, $allowed, true)) {
+            $mapped = $forChild ? 'Mstr.' : 'Mr.';
+        }
+        if ($forChild && !in_array($mapped, ['Mstr.', 'Ms.'], true)) {
+            return 'Mstr.';
+        }
+        return $mapped;
     }
 }
 
@@ -665,12 +863,21 @@ if (!function_exists('grnconnect_pax_counts')) {
 }
 
 if (!function_exists('grnconnect_sanitize_pax_name')) {
-    /** GRN pax name/surname: letters only, no digits or special characters. */
+    /** GRN pax name/surname: letters and spaces only, max 30 characters (spaces count). */
     function grnconnect_sanitize_pax_name($value, $fallback = 'Guest')
     {
-        $name = preg_replace('/[^A-Za-z]/', '', (string)$value);
+        $clean = static function ($raw) {
+            $name = preg_replace('/[^A-Za-z ]/', '', (string)$raw);
+            $name = trim(preg_replace('/\s+/', ' ', $name));
+            if ($name !== '' && strlen($name) > 30) {
+                $name = rtrim(substr($name, 0, 30));
+            }
+            return $name;
+        };
+
+        $name = $clean($value);
         if ($name === '') {
-            $name = preg_replace('/[^A-Za-z]/', '', (string)$fallback) ?: 'Guest';
+            $name = $clean($fallback) ?: 'Guest';
         }
         return $name;
     }
@@ -692,7 +899,7 @@ if (!function_exists('grnconnect_alpha_suffix')) {
 }
 
 if (!function_exists('grnconnect_unique_pax_name')) {
-    /** GRN requires guest names to be unique and contain letters only (no digits). */
+    /** GRN requires unique guest names: letters and spaces only, max 30 characters. */
     function grnconnect_unique_pax_name($base, $suffix, array &$usedNames)
     {
         $base = grnconnect_sanitize_pax_name($base, 'Guest');
@@ -700,7 +907,10 @@ if (!function_exists('grnconnect_unique_pax_name')) {
         $i = 0;
         while (isset($usedNames[strtolower($name)])) {
             $i++;
-            $name = $base . grnconnect_alpha_suffix($i);
+            $suffixStr = grnconnect_alpha_suffix($i);
+            $maxBase = 30 - strlen($suffixStr);
+            $trimmed = $maxBase > 0 ? rtrim(substr($base, 0, $maxBase)) : $suffixStr;
+            $name = $trimmed . $suffixStr;
         }
         $usedNames[strtolower($name)] = true;
         return $name;
@@ -807,8 +1017,18 @@ if (!function_exists('grnconnect_align_paxes_to_rate_room')) {
             $age = isset($ages[$i]) ? (int)$ages[$i] : (int)($child['age'] ?? 1);
             $child['age'] = $age >= 1 ? min(17, $age) : 1;
             $child['type'] = 'CH';
+            $child['title'] = grnconnect_pax_title($child['title'] ?? 'Mstr.', true);
+            $child['name'] = grnconnect_sanitize_pax_name($child['name'] ?? 'Child', 'Child');
+            $child['surname'] = grnconnect_sanitize_pax_name($child['surname'] ?? $fallbackSurname, $fallbackSurname);
         }
         unset($child);
+
+        foreach ($adults as &$adult) {
+            $adult['title'] = grnconnect_pax_title($adult['title'] ?? 'Mr.');
+            $adult['name'] = grnconnect_sanitize_pax_name($adult['name'] ?? 'Guest', 'Guest');
+            $adult['surname'] = grnconnect_sanitize_pax_name($adult['surname'] ?? $fallbackSurname, $fallbackSurname);
+        }
+        unset($adult);
 
         return array_merge($adults, $children);
     }
@@ -932,6 +1152,8 @@ if (!function_exists('grnconnect_build_booking_item_rooms')) {
                 }
                 $pax['name'] = grnconnect_unique_pax_name($base, ($q + 1) * 10 + $pi + 1, $usedNames);
                 $pax['surname'] = grnconnect_sanitize_pax_name($pax['surname'] ?? 'Traveler', 'Traveler');
+                $isChild = ($pax['type'] ?? '') === 'CH';
+                $pax['title'] = grnconnect_pax_title($pax['title'] ?? ($isChild ? 'Mstr.' : 'Mr.'), $isChild);
             }
             unset($pax);
 
@@ -1020,8 +1242,9 @@ if (!function_exists('grnconnect_build_paxes')) {
                 $lname = trim($t['last_name'] ?? '') ?: $surnameFallback;
                 $fname = grnconnect_unique_pax_name($fname, ($idx + 1) * 10 + $adults + $c + 1, $usedNames);
                 $lname = grnconnect_sanitize_pax_name($lname, $surnameFallback);
+                $title = grnconnect_pax_title($t['title'] ?? 'Mstr.', true);
                 $paxes[] = [
-                    'title'   => 'Mstr.',
+                    'title'   => $title,
                     'name'    => $fname,
                     'surname' => $lname,
                     'type'    => 'CH',
@@ -1045,9 +1268,70 @@ if (!function_exists('grnconnect_build_paxes')) {
     }
 }
 
+if (!function_exists('grnconnect_sync_issued_booking')) {
+    /** Refresh a booking that already has a GRN PNR. Does not re-book. */
+    function grnconnect_sync_issued_booking($db, array $booking, array &$bookingData)
+    {
+        $reference = trim((string)($booking['pnr'] ?? $bookingData['grn_booking_reference'] ?? ''));
+        if ($reference === '') {
+            return null;
+        }
+
+        $module = grnconnect_module($db);
+        if (!$module) {
+            return null;
+        }
+        $client = GRNConnectClient::fromModule($module);
+        $res = $client->getBooking($reference);
+        $data = is_array($res['data'] ?? null) ? $res['data'] : [];
+        [$data, $node] = grnconnect_unwrap_booking_payload($data);
+        $status = grnconnect_extract_booking_status($node, $data);
+        $isPayLater = function_exists('grnconnect_booking_is_pay_later')
+            && grnconnect_booking_is_pay_later($db, $booking);
+
+        if (function_exists('grnconnect_attach_pay_later_dates')) {
+            grnconnect_attach_pay_later_dates($bookingData, $db, $data, $booking);
+        }
+
+        $local = grnconnect_map_local_booking_status($status, true, $isPayLater);
+        // Never keep a GRN-issued booking as local "pending" — that is only
+        // the pre-issue state. GRN payment_status pending is unpaid, not this.
+        if ($local === 'pending') {
+            $local = $isPayLater ? 'confirmed' : 'processing';
+        }
+
+        $db->update('bookings', [
+            'booking_status' => $local,
+            'booking_response' => json_encode($data ?: $res),
+            'booking_data' => json_encode($bookingData),
+            'updated_at' => date('Y-m-d H:i:s'),
+        ], ['id' => $booking['id']]);
+
+        return [
+            'status' => true,
+            'success' => $local !== 'failed',
+            'booking_status' => $local,
+            'Prn' => $reference,
+            'booking_reference' => $reference,
+            'reference' => $reference,
+            'message' => 'Existing supplier reference ' . $reference,
+            'invoice_id' => $booking['invoice_id'] ?? '',
+            'pay_later' => $bookingData['pay_later'] ?? null,
+            'data' => [
+                'booking_id' => $booking['id'],
+                'invoice_id' => $booking['invoice_id'] ?? '',
+                'pnr' => $reference,
+                'status' => $local,
+                'pay_later' => $bookingData['pay_later'] ?? null,
+            ],
+        ];
+    }
+}
+
 // ----------------------------------------------------------------------------
 // ROUTE
 // ----------------------------------------------------------------------------
+if (isset($router) && is_object($router)) {
 $router->post('/stays/grnconnect/issue', function () use ($db) {
     if (ob_get_level()) ob_end_clean();
     ob_start();
@@ -1080,3 +1364,44 @@ $router->post('/stays/grnconnect/issue', function () use ($db) {
     }
     $send($result);
 });
+
+$router->post('/stays/grnconnect/check-status', function () use ($db) {
+    if (ob_get_level()) ob_end_clean();
+    ob_start();
+    header('Content-Type: application/json');
+
+    $payload = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($payload)) $payload = $_POST;
+    $invoiceId = $payload['invoice_id'] ?? '';
+
+    $send = function ($data) {
+        if (ob_get_level()) ob_clean();
+        echo json_encode($data);
+        exit;
+    };
+
+    if (empty($invoiceId)) {
+        $send(['status' => false, 'success' => false, 'message' => 'Missing invoice_id parameter']);
+    }
+
+    $booking = $db->get('bookings', '*', ['invoice_id' => $invoiceId, 'module' => 'grnconnect']);
+    if (!$booking) {
+        $send(['status' => false, 'success' => false, 'message' => 'Booking not found']);
+    }
+    $bookingData = json_decode($booking['booking_data'], true) ?: [];
+    if (empty($booking['pnr'])) {
+        $send(['status' => true, 'success' => true, 'booking_status' => $booking['booking_status'], 'message' => 'Not issued yet']);
+    }
+    if (is_file(__DIR__ . '/../pay-later.php')) {
+        require_once __DIR__ . '/../pay-later.php';
+    }
+    $synced = grnconnect_sync_issued_booking($db, $booking, $bookingData);
+    $send($synced ?: [
+        'status' => true,
+        'success' => true,
+        'booking_status' => $booking['booking_status'],
+        'Prn' => $booking['pnr'],
+        'pay_later' => $bookingData['pay_later'] ?? null,
+    ]);
+});
+}

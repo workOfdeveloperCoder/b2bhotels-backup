@@ -54,9 +54,9 @@ $router->get('/stays/(.*)', function ($params) use ($SECURE,$db) {
                     for ($i = 2; $i < count($parts); $i++) {
                         if (isset($parts[$i]) && $parts[$i] !== '' && is_numeric($parts[$i])) {
                             $age = intval($parts[$i]);
-                            if ($age >= 0 && $age <= 17) {
-                                $childAges[] = $age;
-                            }
+                            if ($age < 1) $age = 1;
+                            if ($age > 17) $age = 17;
+                            $childAges[] = $age;
                         }
                     }
 

@@ -363,10 +363,9 @@ if ($defaultGatewayId === '' && !empty($paymentGateways)) {
                                                             class="select"
                                                             :disabled="!formData.booking_for_someone_else"
                                                             required>
-                                                        <option value="Mr"><?= T::mr ?></option>
-                                                        <option value="Mrs"><?= T::mrs ?></option>
-                                                        <option value="Miss"><?= T::miss ?></option>
-                                                        <option value="Ms"><?= T::ms ?></option>
+                                                        <option value="Mr.">Mr.</option>
+                                                        <option value="Ms.">Ms.</option>
+                                                        <option value="Mrs.">Mrs.</option>
                                                     </select>
                                                 </div>
                                                 <div class="form-control">
@@ -375,6 +374,7 @@ if ($defaultGatewayId === '' && !empty($paymentGateways)) {
                                                            x-model="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.first_name"
                                                            class="input"
                                                            :disabled="!formData.booking_for_someone_else"
+                                                           maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.first_name = sanitizeGuestName($event.target.value)"
                                                            required>
                                                 </div>
                                                 <div class="form-control">
@@ -383,6 +383,7 @@ if ($defaultGatewayId === '' && !empty($paymentGateways)) {
                                                            x-model="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.last_name"
                                                            class="input"
                                                            :disabled="!formData.booking_for_someone_else"
+                                                           maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.last_name = sanitizeGuestName($event.target.value)"
                                                            required>
                                                 </div>
                                             </div>
@@ -400,23 +401,24 @@ if ($defaultGatewayId === '' && !empty($paymentGateways)) {
                                                 <div class="form-control">
                                                     <label class="text-xs"><?= T::title ?></label>
                                                     <select x-model="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.title" class="select">
-                                                        <option value="Mr"><?= T::mr ?></option>
-                                                        <option value="Mrs"><?= T::mrs ?></option>
-                                                        <option value="Miss"><?= T::miss ?></option>
-                                                        <option value="Ms"><?= T::ms ?></option>
+                                                        <option value="Mr.">Mr.</option>
+                                                        <option value="Ms.">Ms.</option>
+                                                        <option value="Mrs.">Mrs.</option>
                                                     </select>
                                                 </div>
                                                 <div class="form-control">
                                                     <label class="text-xs"><?= T::first ?> <?= T::name ?></label>
                                                     <input type="text"
                                                            x-model="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.first_name"
-                                                           class="input">
+                                                           class="input"
+                                                           maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.first_name = sanitizeGuestName($event.target.value)">
                                                 </div>
                                                 <div class="form-control">
                                                     <label class="text-xs"><?= T::last ?> <?= T::name ?></label>
                                                     <input type="text"
                                                            x-model="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.last_name"
-                                                           class="input">
+                                                           class="input"
+                                                           maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="formData.travelers.room_<?= $roomIndex ?>.adult_<?= $adultIndex ?>.last_name = sanitizeGuestName($event.target.value)">
                                                 </div>
                                             </div>
                                         </div>
@@ -428,28 +430,37 @@ if ($defaultGatewayId === '' && !empty($paymentGateways)) {
                                     <?php for ($childIndex = 0; $childIndex < $room['children']; $childIndex++): ?>
                                         <div class="mb-3 p-4 bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 rounded-lg">
                                             <h5 class="font-medium text-blue-700 dark:text-blue-300 mb-2 text-sm">
-                                                <?= T::child ?> <?= $childIndex + 1 ?> (<?= T::age ?>: <?= $room['childAges'][$childIndex] ?? '0' ?>)
+                                                <?= T::child ?> <?= $childIndex + 1 ?> (<?= T::age ?>: <?= $room['childAges'][$childIndex] ?? '1' ?>)
                                             </h5>
-                                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                                <div class="form-control">
+                                                    <label class="text-xs"><?= T::title ?></label>
+                                                    <select x-model="formData.travelers.room_<?= $roomIndex ?>.child_<?= $childIndex ?>.title" class="select">
+                                                        <option value="Mstr.">Mstr.</option>
+                                                        <option value="Ms.">Ms.</option>
+                                                    </select>
+                                                </div>
                                                 <div class="form-control">
                                                     <label class="text-xs"><?= T::first ?> <?= T::name ?></label>
                                                     <input type="text"
                                                            x-model="formData.travelers.room_<?= $roomIndex ?>.child_<?= $childIndex ?>.first_name"
-                                                           class="input">
+                                                           class="input"
+                                                           maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="formData.travelers.room_<?= $roomIndex ?>.child_<?= $childIndex ?>.first_name = sanitizeGuestName($event.target.value)">
                                                 </div>
                                                 <div class="form-control">
                                                     <label class="text-xs"><?= T::last ?> <?= T::name ?></label>
                                                     <input type="text"
                                                            x-model="formData.travelers.room_<?= $roomIndex ?>.child_<?= $childIndex ?>.last_name"
-                                                           class="input">
+                                                           class="input"
+                                                           maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="formData.travelers.room_<?= $roomIndex ?>.child_<?= $childIndex ?>.last_name = sanitizeGuestName($event.target.value)">
                                                 </div>
                                                 <div class="form-control">
                                                     <label class="text-xs"><?= T::age ?></label>
                                                     <input type="number"
-                                                           value="<?= $room['childAges'][$childIndex] ?? '0' ?>"
+                                                           value="<?= $room['childAges'][$childIndex] ?? '1' ?>"
                                                            x-model="formData.travelers.room_<?= $roomIndex ?>.child_<?= $childIndex ?>.age"
                                                            class="input"
-                                                           min="0"
+                                                           min="1"
                                                            max="17"
                                                            readonly>
                                                 </div>
@@ -1680,7 +1691,7 @@ function bookingForm() {
                     }
 
                     this.formData.travelers[`room_${roomIndex}`][`adult_${adultIndex}`] = {
-                        title: '',
+                        title: 'Mr.',
                         first_name: '',
                         last_name: ''
                     };
@@ -1693,10 +1704,10 @@ function bookingForm() {
                     }
 
                     this.formData.travelers[`room_${roomIndex}`][`child_${childIndex}`] = {
-                        title: '',
+                        title: 'Mstr.',
                         first_name: '',
                         last_name: '',
-                        age: room.childAges[childIndex] || 0
+                        age: room.childAges[childIndex] || 1
                     };
                 }
             });
@@ -1881,6 +1892,10 @@ function bookingForm() {
 
         convertToBase(displayAmount) {
             return displayAmount / this.conversionRate;
+        },
+
+        sanitizeGuestName(value) {
+            return String(value || '').replace(/[^A-Za-z ]/g, '').replace(/\s+/g, ' ').slice(0, 30);
         },
 
         isGrnPackage(room) {

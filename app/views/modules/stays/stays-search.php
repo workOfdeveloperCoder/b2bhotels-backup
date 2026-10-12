@@ -303,10 +303,10 @@ function hotelSearchData() {
             const roomConfigs = roomsData.map(room => {
                 let config = `${room.adults}-${room.children}`;
                 if (room.children > 0 && room.childAges && room.childAges.length > 0) {
-                    // Preserve age 0 (infant) — do not use `|| 1`
                     const validAges = room.childAges.map(age => {
                         const n = parseInt(age, 10);
-                        return Number.isFinite(n) && n >= 0 ? Math.min(17, n) : 1;
+                        if (!Number.isFinite(n) || n < 1) return 1;
+                        return Math.min(17, n);
                     });
                     if (validAges.length > 0) {
                         config += '-' + validAges.join('-');
@@ -324,7 +324,10 @@ function hotelSearchData() {
 
             // Build hotel details URL (chain defaults to '_' when not available)
             const hotelChain = hotel.chain || '_';
-            const hotelUrl = `<?=root?>stay/${cleanHotelName}/${hotel.id}/${hotel.supplier || 'hotels'}/${hotelChain}/${checkinDate}/${checkoutDate}/${nationality}/${totalRooms}/${roomConfigs}`;
+            let hotelUrl = `<?=root?>stay/${cleanHotelName}/${hotel.id}/${hotel.supplier || 'hotels'}/${hotelChain}/${checkinDate}/${checkoutDate}/${nationality}/${totalRooms}/${roomConfigs}`;
+            if (String(hotel.supplier || '').toLowerCase() === 'grnconnect' && hotel.sid) {
+                hotelUrl += '/' + encodeURIComponent(hotel.sid);
+            }
 
             console.log('Redirecting to hotel details:', hotelUrl);
             window.location.href = hotelUrl;
@@ -431,10 +434,10 @@ function hotelSearchData() {
             const roomConfigs = roomsData.map(room => {
                 let config = `${room.adults}-${room.children}`;
                 if (room.children > 0 && room.childAges && room.childAges.length > 0) {
-                    // Preserve age 0 (infant) — do not use `|| 1`
                     const validAges = room.childAges.map(age => {
                         const n = parseInt(age, 10);
-                        return Number.isFinite(n) && n >= 0 ? Math.min(17, n) : 1;
+                        if (!Number.isFinite(n) || n < 1) return 1;
+                        return Math.min(17, n);
                     });
                     if (validAges.length > 0) {
                         config += '-' + validAges.join('-');
@@ -749,7 +752,7 @@ function hotelSearchData() {
                                 <div class="flex items-center justify-between px-3 py-2 border-b border-gray-100">
                                     <div>
                                         <div class="text-xs font-bold"><?=T::children?></div>
-                                        <div class="text-xs text-gray-500"><?=T::zero_to_seventeen_years?></div>
+                                        <div class="text-xs text-gray-500"><?= T::one_to_seventeen_years ?? '1-17 years' ?></div>
                                     </div>
                                     <div class="flex items-center gap-0.5">
                                         <button type="button" @click="decrementGuest(index, 'children')"
@@ -776,24 +779,9 @@ function hotelSearchData() {
                                                     <span class="text-xs text-gray-600 w-14"><?=T::child?> <span x-text="childIndex + 1"></span>:</span>
                                                     <select x-model.number="room.childAges[childIndex]"
                                                             class="flex-1 text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:border-blue-500">
-                                                        <option value="0">0 <?=T::years?></option>
-                                                        <option value="1">1 <?=T::years?></option>
-                                                        <option value="2">2 <?=T::years?></option>
-                                                        <option value="3">3 <?=T::years?></option>
-                                                        <option value="4">4 <?=T::years?></option>
-                                                        <option value="5">5 <?=T::years?></option>
-                                                        <option value="6">6 <?=T::years?></option>
-                                                        <option value="7">7 <?=T::years?></option>
-                                                        <option value="8">8 <?=T::years?></option>
-                                                        <option value="9">9 <?=T::years?></option>
-                                                        <option value="10">10 <?=T::years?></option>
-                                                        <option value="11">11 <?=T::years?></option>
-                                                        <option value="12">12 <?=T::years?></option>
-                                                        <option value="13">13 <?=T::years?></option>
-                                                        <option value="14">14 <?=T::years?></option>
-                                                        <option value="15">15 <?=T::years?></option>
-                                                        <option value="16">16 <?=T::years?></option>
-                                                        <option value="17">17 <?=T::years?></option>
+                                                        <?php for ($childAgeOpt = 1; $childAgeOpt <= 17; $childAgeOpt++): ?>
+                                                        <option value="<?= $childAgeOpt ?>"><?= $childAgeOpt ?> <?= T::years ?></option>
+                                                        <?php endfor; ?>
                                                     </select>
                                                 </div>
                                             </template>
@@ -896,10 +884,11 @@ function hotelSearchData() {
                         const childCount = parseInt(room.children) || 0;
                         let childAges = Array.isArray(room.childAges) ? room.childAges : [];
 
-                        // Convert ages to numbers — keep 0 (infant); only default invalid/missing to 1
+                        // GRNConnect accepts child ages 1-17
                         childAges = childAges.map(age => {
                             const n = parseInt(age, 10);
-                            return Number.isFinite(n) && n >= 0 ? Math.min(17, n) : 1;
+                            if (!Number.isFinite(n) || n < 1) return 1;
+                            return Math.min(17, n);
                         });
 
                         // Sync childAges array length with children count

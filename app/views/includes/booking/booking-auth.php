@@ -259,10 +259,16 @@ $bookingType = ($isUserLoggedIn) ? 'logged_in' : ($isGuestBookingEnabled ? 'gues
                             <?php if (!$isUserLoggedIn): ?>:required="bookingType === 'guest'"<?php else: ?>required<?php endif; ?>
                             :disabled="isUserLoggedIn && !booking_for_someone_else">
                         <option value="" disabled selected><?= T::select ?? 'Select' ?></option>
+                        <?php if (!empty($isGrnConnect)): ?>
+                        <option value="Mr." <?php if ($isUserLoggedIn && in_array($loggedInUser['title'] ?? '', ['Mr', 'Mr.', 'Dr', 'Prof'], true)): ?>selected<?php endif; ?>>Mr.</option>
+                        <option value="Ms." <?php if ($isUserLoggedIn && in_array($loggedInUser['title'] ?? '', ['Ms', 'Ms.', 'Miss'], true)): ?>selected<?php endif; ?>>Ms.</option>
+                        <option value="Mrs." <?php if ($isUserLoggedIn && in_array($loggedInUser['title'] ?? '', ['Mrs', 'Mrs.'], true)): ?>selected<?php endif; ?>>Mrs.</option>
+                        <?php else: ?>
                         <option value="Mr" <?php if ($isUserLoggedIn && $loggedInUser['title'] == 'Mr'): ?>selected<?php endif; ?>>Mr</option>
                         <option value="Mrs" <?php if ($isUserLoggedIn && $loggedInUser['title'] == 'Mrs'): ?>selected<?php endif; ?>>Mrs</option>
                         <option value="Ms" <?php if ($isUserLoggedIn && $loggedInUser['title'] == 'Ms'): ?>selected<?php endif; ?>>Ms</option>
                         <option value="Dr" <?php if ($isUserLoggedIn && $loggedInUser['title'] == 'Dr'): ?>selected<?php endif; ?>>Dr</option>
+                        <?php endif; ?>
                     </select>
                 </div>
 
@@ -270,10 +276,8 @@ $bookingType = ($isUserLoggedIn) ? 'logged_in' : ($isGuestBookingEnabled ? 'gues
                     <label><?= T::first_name ?? 'First Name' ?></label>
                     <input type="text"
                            x-model="primary_guest.first_name"
-                           @input="primary_guest.first_name = primary_guest.first_name.replace(/[0-9]/g, '')"
                            class="input"
-                           pattern="[^0-9]*"
-                           title="Letters only, no numbers"
+                           <?php if (!empty($isGrnConnect)): ?>maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="primary_guest.first_name = String($event.target.value || '').replace(/[^A-Za-z ]/g, '').replace(/\s+/g, ' ').slice(0, 30)"<?php else: ?>@input="primary_guest.first_name = primary_guest.first_name.replace(/[0-9]/g, '')" pattern="[^0-9]*" title="Letters only, no numbers"<?php endif; ?>
                            <?php if (!$isUserLoggedIn): ?>:required="bookingType === 'guest'"<?php else: ?>required<?php endif; ?>
                            :disabled="isUserLoggedIn && !booking_for_someone_else"
                            placeholder="<?= T::enter_first_name ?? 'Enter first name' ?>">
@@ -283,10 +287,8 @@ $bookingType = ($isUserLoggedIn) ? 'logged_in' : ($isGuestBookingEnabled ? 'gues
                     <label><?= T::last_name ?? 'Last Name' ?></label>
                     <input type="text"
                            x-model="primary_guest.last_name"
-                           @input="primary_guest.last_name = primary_guest.last_name.replace(/[0-9]/g, '')"
                            class="input"
-                           pattern="[^0-9]*"
-                           title="Letters only, no numbers"
+                           <?php if (!empty($isGrnConnect)): ?>maxlength="30" pattern="[A-Za-z ]+" title="Letters and spaces only, max 30 characters" @input="primary_guest.last_name = String($event.target.value || '').replace(/[^A-Za-z ]/g, '').replace(/\s+/g, ' ').slice(0, 30)"<?php else: ?>@input="primary_guest.last_name = primary_guest.last_name.replace(/[0-9]/g, '')" pattern="[^0-9]*" title="Letters only, no numbers"<?php endif; ?>
                            <?php if (!$isUserLoggedIn): ?>:required="bookingType === 'guest'"<?php else: ?>required<?php endif; ?>
                            :disabled="isUserLoggedIn && !booking_for_someone_else"
                            placeholder="<?= T::enter_last_name ?? 'Enter last name' ?>">
@@ -446,6 +448,13 @@ function bookingAuth() {
                 this.primary_guest.email = userData.email || '';
                 this.primary_guest.phone = userData.phone || '';
                 this.primary_guest.country_code = userData.phone_country_code || '';
+                <?php if (!empty($isGrnConnect)): ?>
+                const grnTitleMap = { mr: 'Mr.', mrs: 'Mrs.', ms: 'Ms.', miss: 'Ms.', mstr: 'Mstr.', master: 'Mstr.', dr: 'Mr.', prof: 'Mr.' };
+                const titleKey = String(this.primary_guest.title || '').toLowerCase().replace(/\.+$/, '');
+                this.primary_guest.title = grnTitleMap[titleKey] || 'Mr.';
+                this.primary_guest.first_name = String(this.primary_guest.first_name || '').replace(/[^A-Za-z ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 30);
+                this.primary_guest.last_name = String(this.primary_guest.last_name || '').replace(/[^A-Za-z ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 30);
+                <?php endif; ?>
             }
 
             this.$watch('primary_guest.country_code', () => {

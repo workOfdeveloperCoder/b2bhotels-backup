@@ -69,7 +69,11 @@ $router->get('/stays/booking/([a-f0-9]{16})', function ($hash) use ($SECURE, $db
     $title = 'Complete Booking - ' . $GLOBALS['app']['home_title'];
     $description = "Complete your hotel booking";
     require_once views."includes/header.php";
-    require_once views."modules/stays/booking/index.php";
+    $bookingSupplier = strtolower((string)($bookingData['supplier'] ?? ''));
+    $bookingView = $bookingSupplier === 'grnconnect'
+        ? views."modules/stays/booking/index-grn.php"
+        : views."modules/stays/booking/index.php";
+    require_once $bookingView;
     require_once views."includes/footer.php";
 });
     
@@ -185,6 +189,14 @@ $router->post('/api/stay/booking/update-draft', function () use ($SECURE, $db) {
         }
         if (!empty($input['checkrate_accepted_at'])) {
             $bookingData['checkrate_accepted_at'] = $input['checkrate_accepted_at'];
+        }
+        if (strtolower((string)($bookingData['supplier'] ?? '')) === 'grnconnect') {
+            if (!empty($input['grn_recheck']) && is_array($input['grn_recheck'])) {
+                $bookingData['grn_recheck'] = $input['grn_recheck'];
+            }
+            if (!empty($input['grn_rechecks']) && is_array($input['grn_rechecks'])) {
+                $bookingData['grn_rechecks'] = array_values($input['grn_rechecks']);
+            }
         }
 
         $updated = $db->update('logs_bookings', [
@@ -450,6 +462,25 @@ $router->post('/api/stay/booking/submit', function () use ($SECURE, $db) {
             }
             if (!empty($input['checkrate_accepted_at'])) {
                 $bookingData['checkrate_accepted_at'] = $input['checkrate_accepted_at'];
+            }
+        }
+        if ($supplierName === 'grnconnect') {
+            if (!empty($input['selected_rooms']) && is_array($input['selected_rooms'])) {
+                $bookingData['selected_rooms'] = $input['selected_rooms'];
+            }
+            if (!empty($input['grn_recheck']) && is_array($input['grn_recheck'])) {
+                $bookingData['grn_recheck'] = $input['grn_recheck'];
+            }
+            if (!empty($input['grn_rechecks']) && is_array($input['grn_rechecks'])) {
+                $bookingData['grn_rechecks'] = array_values($input['grn_rechecks']);
+            }
+            $grnRecheck = is_array($bookingData['grn_recheck'] ?? null) ? $bookingData['grn_recheck'] : [];
+            if (
+                empty($grnRecheck['search_id'])
+                || empty($grnRecheck['rate_key'])
+                || empty($grnRecheck['group_code'])
+            ) {
+                throw new Exception('Please wait for rate verification to complete before booking.');
             }
         }
 

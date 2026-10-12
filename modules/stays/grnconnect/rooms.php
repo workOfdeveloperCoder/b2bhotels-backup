@@ -142,18 +142,26 @@ $router->post('/stays/grnconnect/rooms', function () use ($db) {
 
         $singleRates = [];
         $allRates    = [];
+        $packageRates = [];
         foreach ($rates as $rate) {
             if (!is_array($rate)) continue;
             $allRates[] = $rate;
-            if ($allocSize($rate) === 1) {
+            $size = $allocSize($rate);
+            if ($size === 1) {
                 $singleRates[] = $rate;
+            }
+            if ($requestedRoomCount > 1 && $size >= $requestedRoomCount) {
+                $packageRates[] = $rate;
             }
         }
 
-        $ratesToShow = $allRates;
-        $hasSingles  = !empty($singleRates);
-        $hasPackages = count($allRates) > count($singleRates);
-        $mixable     = $hasSingles && $requestedRoomCount > 1;
+        // Multi-room search is bundled-only: one rate_key covers every requested room,
+        // including mixed types (Twin + Suite) inside that package.
+        $bundledOnly = $requestedRoomCount > 1;
+        $ratesToShow = $bundledOnly ? $packageRates : $allRates;
+        $hasSingles  = !$bundledOnly && !empty($singleRates);
+        $hasPackages = !empty($packageRates) || (!$bundledOnly && count($allRates) > count($singleRates));
+        $mixable     = false;
 
         $optionCtx = [
             'module'          => $module,
@@ -193,51 +201,55 @@ $router->post('/stays/grnconnect/rooms', function () use ($db) {
             }
         }
 
-        // Build UI cards. Every multi-room rate_key is one independent bundle
-        // card; never group different packages merely because their room names
-        // look the same. Single-room rates retain the classic room grouping.
+        // One UI card per rate_key — never fold two rates into one room just
+        // because room_type matches. Special Deal TACBB and Standard BAR20 on
+        // "Deluxe Twin Room (Marina View)" are two cards. A bundled rate_key
+        // is still one card, with every rooms[] node listed under that rate.
         $grouped = [];
         $bundleNumber = 0;
         foreach ($ratesToShow as $rate) {
             $rateSize = $allocSize($rate);
-            if ($rateSize === 1) {
-                $roomInfo = $rate['rooms'][0] ?? [];
-                $parts    = function_exists('grnconnect_room_display_parts')
-                    ? grnconnect_room_display_parts($roomInfo)
-                    : ['title' => 'Room', 'detail' => ''];
-                $roomName = $parts['title'] ?: 'Room';
-                $groupKey = 'room|' . $roomName;
-                if (!isset($grouped[$groupKey])) {
-                    $grouped[$groupKey] = [
-                        'display_name'  => $roomName,
-                        'package_label' => '',
-                        'is_package'    => false,
-                        'bundle_number' => 0,
-                        'rates'         => [],
-                    ];
-                }
-            } else {
+            $isPackage = $rateSize > 1;
+            $rateKey = trim((string)($rate['rate_key'] ?? ''));
+            $groupKey = 'rate|' . ($rateKey !== '' ? $rateKey : uniqid('grn_', true));
+
+            $nodes = function_exists('grnconnect_rate_rooms_nodes')
+                ? grnconnect_rate_rooms_nodes($rate)
+                : (is_array($rate['rooms'] ?? null) ? $rate['rooms'] : []);
+            $firstNode = is_array($nodes[0] ?? null) ? $nodes[0] : [];
+            $names = function_exists('grnconnect_rate_room_title')
+                ? grnconnect_rate_room_title($firstNode)
+                : [
+                    'title'       => trim((string)($firstNode['room_type'] ?? ($firstNode['description'] ?? 'Room'))),
+                    'description' => trim((string)($firstNode['description'] ?? '')),
+                ];
+            $roomName = trim((string)($names['title'] ?? '')) ?: 'Room';
+            $rateDescription = trim((string)($names['description'] ?? ($firstNode['description'] ?? '')));
+
+            $packageLabel = '';
+            $thisBundle = 0;
+            if ($isPackage) {
+                $bundleNumber++;
+                $thisBundle = $bundleNumber;
                 $packageLabel = function_exists('grnconnect_rate_package_label')
                     ? grnconnect_rate_package_label($rate)
                     : (function_exists('grnconnect_rate_display_name')
                         ? grnconnect_rate_display_name($rate)
-                        : 'Room');
-                if ($packageLabel === '') $packageLabel = 'Room package';
-
-                $bundleNumber++;
-                $rateKey = trim((string)($rate['rate_key'] ?? ''));
-                $groupKey = 'bundle|' . ($rateKey !== '' ? $rateKey : $bundleNumber);
-                $roomName = 'Bundle ' . $bundleNumber;
-                $grouped[$groupKey] = [
-                    'display_name'  => $roomName,
-                    'package_label' => $packageLabel,
-                    'is_package'    => true,
-                    'bundle_number' => $bundleNumber,
-                    'rates'         => [],
-                ];
+                        : $roomName);
+                if ($packageLabel === '') {
+                    $packageLabel = 'Room package';
+                }
+                $roomName = $packageLabel;
             }
-            if ($roomName === '') $roomName = 'Room';
-            $grouped[$groupKey]['rates'][] = $rate;
+
+            $grouped[$groupKey] = [
+                'display_name'   => $roomName,
+                'package_label'  => $packageLabel,
+                'package_detail' => $rateDescription,
+                'is_package'     => $isPackage,
+                'bundle_number'  => $thisBundle,
+                'rates'          => [$rate],
+            ];
         }
 
         $formattedRooms = [];
@@ -282,6 +294,10 @@ $router->post('/stays/grnconnect/rooms', function () use ($db) {
 
             if (empty($options)) continue;
 
+            usort($options, static function ($a, $b) {
+                return ((float)($a['total_price'] ?? 0)) <=> ((float)($b['total_price'] ?? 0));
+            });
+
             $firstRoomInfo = $options[0]['rate_rooms'][0] ?? ($roomRates[0]['rooms'][0] ?? []);
             $firstPackageRooms = is_array($options[0]['package_rooms'] ?? null)
                 ? $options[0]['package_rooms']
@@ -306,10 +322,10 @@ $router->post('/stays/grnconnect/rooms', function () use ($db) {
                 'room_name'           => $roomName,
                 'room_type_name'      => $isPackage
                     ? ($packageLabel !== '' ? $packageLabel : ($packageRoomCount . '-room package'))
-                    : ($firstRoomInfo['room_type'] ?? $roomName),
+                    : $roomName,
                 'description'         => $isPackage
-                    ? 'These rooms are supplied and selected together as one package.'
-                    : (string)($firstRoomInfo['description'] ?? ''),
+                    ? ''
+                    : trim((string)($firstRoomInfo['description'] ?? ($groupData['package_detail'] ?? ''))),
                 'max_adults'          => $isPackage && $packageAdults > 0 ? $packageAdults : $maxAdults,
                 'max_children'        => $isPackage ? $packageChildren : $maxChildren,
                 'bed_type'            => function_exists('grnconnect_bed_type')
@@ -331,6 +347,10 @@ $router->post('/stays/grnconnect/rooms', function () use ($db) {
                 'package_rooms'       => $firstPackageRooms,
             ];
         }
+
+        usort($formattedRooms, static function ($a, $b) {
+            return ((float)($a['min_price_per_night'] ?? 0)) <=> ((float)($b['min_price_per_night'] ?? 0));
+        });
 
         $roomsConfig = array_map(static function ($r) {
             $ages = $r['children_ages'] ?? [];
@@ -480,10 +500,45 @@ if (!function_exists('grnconnect_bed_type')) {
     }
 }
 
+if (!function_exists('grnconnect_is_supplier_rate_line')) {
+    /** True when description is a GRN rate code line, not guest-facing room copy. */
+    function grnconnect_is_supplier_rate_line($text)
+    {
+        $text = trim((string)$text);
+        if ($text === '') {
+            return false;
+        }
+        return (bool)preg_match(
+            '/\b(TACRO|TACBB|BAR\d+|Special Deal|Room Only|Bed and Breakfast)\b/i',
+            $text
+        );
+    }
+}
+
+if (!function_exists('grnconnect_room_card_description')) {
+    /**
+     * Room-card subtitle. Skip supplier rate lines so the heading stays the
+     * full room_type (City View vs Marina View) like the original listing.
+     */
+    function grnconnect_room_card_description($roomInfo, $roomName = '')
+    {
+        if (!is_array($roomInfo)) {
+            return '';
+        }
+        $desc = trim((string)($roomInfo['description'] ?? ''));
+        if ($desc === '' || strcasecmp($desc, (string)$roomName) === 0) {
+            return '';
+        }
+        if (grnconnect_is_supplier_rate_line($desc)) {
+            return '';
+        }
+        return $desc;
+    }
+}
+
 if (!function_exists('grnconnect_room_display_parts')) {
     /**
-     * Normalize GRN room title/description so the UI does not show repeated
-     * occupancy tags or duplicated bed text in the main room heading.
+     * Full GRN room_type as the card title, matching the original 1-room view.
      *
      * @return array{title:string, detail:string}
      */
@@ -493,37 +548,15 @@ if (!function_exists('grnconnect_room_display_parts')) {
             return ['title' => 'Room', 'detail' => ''];
         }
 
-        $roomType = trim((string)($roomInfo['room_type'] ?? ''));
-        $desc     = trim((string)($roomInfo['description'] ?? ''));
+        $names = function_exists('grnconnect_rate_room_title')
+            ? grnconnect_rate_room_title($roomInfo)
+            : [
+                'title'       => trim((string)($roomInfo['room_type'] ?? ($roomInfo['description'] ?? 'Room'))),
+                'description' => trim((string)($roomInfo['description'] ?? '')),
+            ];
 
-        $title  = '';
-        $detail = '';
-
-        if ($roomType !== '' && preg_match('/^(.*?)\s*\((.*?)\)\s*$/', $roomType, $m)) {
-            $title  = trim((string)$m[1]);
-            $detail = trim((string)$m[2]);
-        }
-
-        if ($title === '') {
-            $title = $roomType !== '' ? $roomType : $desc;
-        }
-
-        if ($detail === '' && $desc !== '') {
-            $descClean = preg_replace('/\s+/', ' ', $desc);
-            if ($title !== '' && stripos($descClean, $title) === 0) {
-                $detail = trim(substr($descClean, strlen($title)));
-            } elseif (strcasecmp($descClean, $title) !== 0) {
-                $detail = trim($descClean);
-            }
-        }
-
-        $title  = trim($title) !== '' ? trim($title) : 'Room';
-        $detail = trim((string)$detail);
-
-        if ($detail !== '') {
-            $detail = preg_replace('/\s*\/\s*/', '/', $detail);
-            $detail = preg_replace('/\s+/', ' ', $detail);
-        }
+        $title = trim((string)($names['title'] ?? '')) ?: 'Room';
+        $detail = grnconnect_room_card_description($roomInfo, $title);
 
         return ['title' => $title, 'detail' => $detail];
     }
@@ -532,16 +565,17 @@ if (!function_exists('grnconnect_room_display_parts')) {
 if (!function_exists('grnconnect_rate_package_label')) {
     function grnconnect_rate_package_label(array $rate)
     {
-        $roomsInfo = $rate['rooms'] ?? [];
+        $roomsInfo = function_exists('grnconnect_rate_rooms_nodes')
+            ? grnconnect_rate_rooms_nodes($rate)
+            : ($rate['rooms'] ?? []);
         if (!is_array($roomsInfo) || empty($roomsInfo)) return 'Room';
         $titles = [];
         $counts = [];
         foreach ($roomsInfo as $roomInfo) {
             if (!is_array($roomInfo)) continue;
-            $parts = function_exists('grnconnect_room_display_parts')
-                ? grnconnect_room_display_parts($roomInfo)
-                : ['title' => trim((string)($roomInfo['room_type'] ?? ($roomInfo['description'] ?? 'Room')))];
-            $name = trim((string)($parts['title'] ?? 'Room'));
+            $name = function_exists('grnconnect_rate_room_title')
+                ? grnconnect_rate_room_title($roomInfo)['title']
+                : trim((string)($roomInfo['room_type'] ?? ($roomInfo['description'] ?? 'Room')));
             if ($name === '') $name = 'Room';
             if (!isset($counts[$name])) {
                 $titles[] = $name;

@@ -129,6 +129,8 @@ app/routes/users/emailVerificationRoutes.php.zip.well-known.tar
 /modules/stays/ratehawk/logs_old_bugs/
 /modules/stays/ratehawk/*.php_bk
 
+/modules/stays/ratehawk/logs/
+*
 # Generated Umrah itinerary uploads
 /install/*
 !/install/umrah.php

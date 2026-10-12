@@ -10,7 +10,9 @@ if (!function_exists('grnconnect_rate_allocation_size')) {
     /** How many physical rooms a rate covers. */
     function grnconnect_rate_allocation_size(array $rate)
     {
-        $fromRooms = is_array($rate['rooms'] ?? null) ? count($rate['rooms']) : 0;
+        $fromRooms = function_exists('grnconnect_rate_rooms_nodes')
+            ? count(grnconnect_rate_rooms_nodes($rate))
+            : (is_array($rate['rooms'] ?? null) ? count($rate['rooms']) : 0);
         $fromNo    = (int)($rate['no_of_rooms'] ?? 0);
         return max(1, $fromRooms, $fromNo);
     }

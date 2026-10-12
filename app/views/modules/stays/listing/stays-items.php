@@ -62,9 +62,14 @@ PERFORMANCE:
             return `${r.adults}-${r.children}${ages}`;
         }).join('/');
 
-        const hotelChain = h.original_data.chain || h.hotel_chain || '_';
-
-        return `<?= root ?>stay/${slug}/${hotelId}/${h.supplier.toLowerCase()}/${hotelChain}/${searchParams.checkin}/${searchParams.checkout}/${searchParams.nationality}/${searchParams.rooms}/${rooms}`;
+        const hotelChain = (h.original_data && h.original_data.chain) || h.hotel_chain || '_';
+        const supplier = String(h.supplier || '').toLowerCase();
+        let url = `<?= root ?>stay/${slug}/${hotelId}/${supplier}/${hotelChain}/${searchParams.checkin}/${searchParams.checkout}/${searchParams.nationality}/${searchParams.rooms}/${rooms}`;
+        const sid = h.original_data && h.original_data.sid;
+        if (supplier === 'grnconnect' && sid) {
+            url += '/' + encodeURIComponent(sid);
+        }
+        return url;
     }
 
     /**
